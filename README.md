@@ -1,6 +1,6 @@
-# Cadence StreamPay Dashboard
+# Cadence
 
-Vercel-ready React dashboard for StreamPay/Cadence.
+Vercel-ready React prototype for real-time XRPL payroll, Crossmark wallet signing, and portable income proofs.
 
 ## Local Development
 

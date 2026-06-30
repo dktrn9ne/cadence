@@ -1,9 +1,9 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import StreamPayDashboard from "./StreamPayDashboard.jsx";
+import CadenceDashboard from "./StreamPayDashboard.jsx";
 
 createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <StreamPayDashboard />
+    <CadenceDashboard />
   </React.StrictMode>
 );

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import crossmark from "@crossmarkio/sdk";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
   BarChart, Bar, Cell,
@@ -6,24 +7,24 @@ import {
 
 // ─── Design system ──────────────────────────────────────────────────────────
 const T = {
-  bg:        "#030C16",
-  surf:      "#091521",
-  surf2:     "#0E1E2E",
-  surf3:     "#162436",
-  border:    "rgba(0,198,150,0.11)",
-  borderB:   "rgba(0,198,150,0.2)",
-  green:     "#00C896",
-  greenDim:  "rgba(0,198,150,0.08)",
-  greenMid:  "rgba(0,198,150,0.16)",
-  amber:     "#F59E0B",
-  amberDim:  "rgba(245,158,11,0.1)",
-  blue:      "#3B8BD4",
-  blueDim:   "rgba(59,139,212,0.1)",
-  purple:    "#8B7DD8",
-  purpleDim: "rgba(139,125,216,0.1)",
-  text:      "#DDE6F0",
-  muted:     "#5A7080",
-  dim:       "#1A2A3A",
+  bg:        "#F5F7F4",
+  surf:      "#FFFFFF",
+  surf2:     "#EDF2EF",
+  surf3:     "#E1E8E4",
+  border:    "rgba(22,35,31,0.11)",
+  borderB:   "rgba(22,35,31,0.2)",
+  green:     "#107C66",
+  greenDim:  "rgba(16,124,102,0.09)",
+  greenMid:  "rgba(16,124,102,0.18)",
+  amber:     "#C86632",
+  amberDim:  "rgba(200,102,50,0.11)",
+  blue:      "#2457A6",
+  blueDim:   "rgba(36,87,166,0.1)",
+  purple:    "#6D55B8",
+  purpleDim: "rgba(109,85,184,0.1)",
+  text:      "#13201C",
+  muted:     "#65746F",
+  dim:       "#CBD6D1",
   mono:      "'Menlo','Monaco','Consolas',monospace",
 };
 
@@ -37,13 +38,35 @@ const HOURS_IN = 4.5;
 const INIT_BAL = PER_SEC * HOURS_IN * 3600;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-const fmt = (n, d = 2) =>
-  "$" + n.toFixed(d).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+const fmt = (n, d = 2) => {
+  const [whole, fraction] = n.toFixed(d).split(".");
+  const formattedWhole = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `$${formattedWhole}${fraction ? `.${fraction}` : ""}`;
+};
 
 const hash = () =>
   Array.from({ length: 64 }, () => "0123456789ABCDEF"[Math.floor(Math.random() * 16)]).join("");
 
 const shortHash = (h) => h.slice(0, 8) + "…" + h.slice(-6);
+
+const shortAddress = (address) =>
+  address ? `${address.slice(0, 6)}...${address.slice(-6)}` : "";
+
+const getCrossmarkAddress = (result) =>
+  result?.response?.data?.address ||
+  result?.response?.address ||
+  result?.data?.address ||
+  result?.address ||
+  "";
+
+const getCrossmarkTx = (result) =>
+  result?.response?.data?.resp?.result ||
+  result?.response?.data?.resp ||
+  result?.response?.resp?.result ||
+  result?.response?.resp ||
+  result?.data?.resp?.result ||
+  result?.data?.resp ||
+  {};
 
 function genChart(bal) {
   return Array.from({ length: 60 }, (_, i) => {
@@ -106,7 +129,7 @@ function Card({ children, style = {} }) {
   return (
     <div style={{
       background: T.surf, border: `1px solid ${T.border}`,
-      borderRadius: 14, ...style,
+      borderRadius: 8, boxShadow: "0 12px 34px rgba(34,49,43,0.06)", ...style,
     }}>
       {children}
     </div>
@@ -149,16 +172,16 @@ function ChartTooltip({ active, payload, label }) {
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 function Sidebar({ tab, setTab }) {
   const nav = [
-    { id: "worker",   label: "Worker view"   },
-    { id: "employer", label: "Employer view" },
-    { id: "nullmark", label: "Nullmark"      },
+    { id: "worker",   label: "Worker"        },
+    { id: "employer", label: "Treasury"      },
+    { id: "nullmark", label: "Proofs"        },
   ];
 
   const protocols = [
-    { label: "XRPL Mainnet",  sub: "3–5 sec · $0.0002",       color: T.green  },
-    { label: "SecretVM",       sub: "Salary sealed in TEE",     color: T.purple },
-    { label: "x402 Protocol", sub: "HTTP payments active",      color: T.blue   },
-    { label: "Nullmark",      sub: "Income proof building",     color: T.amber  },
+    { label: "Crossmark",     sub: "Browser-native signing",    color: T.green  },
+    { label: "XRPL",          sub: "Fast payroll settlement",    color: T.blue   },
+    { label: "SecretVM",      sub: "Salary data sealed",        color: T.purple },
+    { label: "Proofs",        sub: "Portable income proofs",    color: T.amber  },
   ];
 
   return (
@@ -172,13 +195,13 @@ function Sidebar({ tab, setTab }) {
       <div style={{ padding: "0 18px 24px", borderBottom: `1px solid ${T.border}` }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{
-            width: 32, height: 32, background: T.green, borderRadius: 8,
+            width: 32, height: 32, background: T.text, borderRadius: 8,
             display: "flex", alignItems: "center", justifyContent: "center",
-            fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.bg,
-          }}>SP</div>
+            fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.surf,
+          }}>CD</div>
           <div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: "-0.3px" }}>StreamPay</div>
-            <div style={{ fontSize: 10, color: T.muted }}>Library Labs</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: 0 }}>Cadence</div>
+            <div style={{ fontSize: 10, color: T.muted }}>Payroll to trust</div>
           </div>
         </div>
       </div>
@@ -205,7 +228,7 @@ function Sidebar({ tab, setTab }) {
 
       {/* Protocol status */}
       <div style={{ padding: "16px 18px", flex: 1 }}>
-        <SectionLabel>Protocol stack</SectionLabel>
+        <SectionLabel>Settlement stack</SectionLabel>
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {protocols.map(p => (
             <div key={p.label} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
@@ -223,7 +246,7 @@ function Sidebar({ tab, setTab }) {
       <div style={{ padding: "16px 18px", borderTop: `1px solid ${T.border}` }}>
         <div style={{ fontSize: 10, color: T.muted, lineHeight: 1.5 }}>
           Toledo Holdings<br />
-          <span style={{ color: T.dim + "ff", fontSize: 9 }}>XRPL Mainnet · SecretVM</span>
+          <span style={{ color: T.muted, fontSize: 9 }}>Crossmark · XRPL · Proofs</span>
         </div>
       </div>
     </div>
@@ -265,17 +288,12 @@ function WorkerView({ balance, tick, onWithdraw }) {
 
       {/* Hero balance */}
       <Card style={{ padding: "24px 28px", position: "relative", overflow: "hidden" }}>
-        <div style={{
-          position: "absolute", top: -80, right: -80, width: 360, height: 360,
-          background: "radial-gradient(circle, rgba(0,198,150,0.05) 0%, transparent 65%)",
-          pointerEvents: "none",
-        }} />
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 14 }}>
           <div>
             <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: T.muted, marginBottom: 10 }}>
-              Current earned balance · RLUSD
+              Available earnings · RLUSD
             </div>
-            <div style={{ fontFamily: T.mono, fontSize: 54, fontWeight: 700, color: T.green, lineHeight: 1, letterSpacing: "-1.5px", marginBottom: 10 }}>
+            <div style={{ fontFamily: T.mono, fontSize: 54, fontWeight: 700, color: T.green, lineHeight: 1, letterSpacing: 0, marginBottom: 10 }}>
               {fmt(balance, 4)}
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
@@ -290,14 +308,14 @@ function WorkerView({ balance, tick, onWithdraw }) {
           </div>
           <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 }}>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-              <Pill label="Streaming" color={T.green} />
+              <Pill label="Earning live" color={T.green} />
               <Pill label="TEE sealed" color={T.purple} />
             </div>
             <button
               onClick={onWithdraw}
               style={{
-                background: T.amber, color: "#0a0a0a", border: "none",
-                borderRadius: 10, padding: "11px 24px", fontWeight: 700,
+                background: T.text, color: T.surf, border: "none",
+                borderRadius: 8, padding: "11px 24px", fontWeight: 700,
                 fontSize: 13, cursor: "pointer", letterSpacing: "0.02em",
                 transition: "opacity 0.15s",
               }}
@@ -334,7 +352,7 @@ function WorkerView({ balance, tick, onWithdraw }) {
           <div key={s.label} style={{
             flex: 1, minWidth: 120,
             background: T.surf, border: `1px solid ${T.border}`,
-            borderRadius: 12, padding: "14px 16px",
+            borderRadius: 8, padding: "14px 16px",
           }}>
             <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: T.muted, marginBottom: 8 }}>{s.label}</div>
             <div style={{ fontFamily: T.mono, fontSize: 18, fontWeight: 700, color: s.color, marginBottom: 3 }}>{s.value}</div>
@@ -377,7 +395,7 @@ function WorkerView({ balance, tick, onWithdraw }) {
 
         {/* TX feed */}
         <Card style={{ padding: "18px", display: "flex", flexDirection: "column", gap: 8 }}>
-          <SectionLabel>XRPL settlement feed</SectionLabel>
+          <SectionLabel>Settlement receipts</SectionLabel>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1 }}>
             {txs.slice(0, 5).map((tx, i) => (
               <div key={i} style={{
@@ -409,7 +427,7 @@ function WorkerView({ balance, tick, onWithdraw }) {
       {/* x402 spending */}
       <Card style={{ padding: "18px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-          <SectionLabel>x402 spending layer</SectionLabel>
+          <SectionLabel>Pay rails</SectionLabel>
           <Pill label="HTTP-native" color={T.blue} />
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
@@ -419,7 +437,7 @@ function WorkerView({ balance, tick, onWithdraw }) {
             { label: "Subscriptions",     rate: "$2.99 / month",   status: "pending", color: T.amber },
           ].map(item => (
             <div key={item.label} style={{
-              background: T.surf2, borderRadius: 10, padding: "12px 14px",
+              background: T.surf2, borderRadius: 8, padding: "12px 14px",
               border: `1px solid ${item.color}18`,
             }}>
               <div style={{ fontSize: 10, color: T.muted, marginBottom: 5 }}>{item.label}</div>
@@ -472,7 +490,7 @@ function EmployerView() {
             </div>
           </div>
           <button style={{
-            background: T.green, color: T.bg, border: "none", borderRadius: 10,
+            background: T.text, color: T.surf, border: "none", borderRadius: 8,
             padding: "11px 24px", fontWeight: 700, fontSize: 13, cursor: "pointer",
           }}>
             Top up pool
@@ -490,7 +508,7 @@ function EmployerView() {
         ].map(s => (
           <div key={s.label} style={{
             flex: 1, minWidth: 100, background: T.surf, border: `1px solid ${T.border}`,
-            borderRadius: 12, padding: "14px 16px",
+            borderRadius: 8, padding: "14px 16px",
           }}>
             <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: T.muted, marginBottom: 8 }}>{s.label}</div>
             <div style={{ fontFamily: T.mono, fontSize: 16, fontWeight: 700, color: s.color }}>{s.value}</div>
@@ -506,7 +524,7 @@ function EmployerView() {
             {workers.map(w => (
               <div key={w.id} style={{
                 display: "flex", alignItems: "center", gap: 12,
-                padding: "10px 12px", borderRadius: 10, background: T.surf2,
+                padding: "10px 12px", borderRadius: 8, background: T.surf2,
                 border: `1px solid ${w.active ? T.border : "transparent"}`,
                 opacity: w.active ? 1 : 0.5,
               }}>
@@ -575,8 +593,8 @@ function EmployerView() {
   );
 }
 
-// ─── Nullmark view ────────────────────────────────────────────────────────────
-function NullmarkView() {
+// ─── Proofs view ──────────────────────────────────────────────────────────────
+function ProofsView() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
 
@@ -585,7 +603,7 @@ function NullmarkView() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
           <div>
             <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: T.muted, marginBottom: 10 }}>
-              Credit intelligence · Nullmark
+              Cadence Proofs
             </div>
             <div style={{ fontSize: 36, fontWeight: 700, color: T.text, lineHeight: 1, marginBottom: 8 }}>
               On-chain income profile
@@ -609,7 +627,7 @@ function NullmarkView() {
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {PROOFS.map((p, i) => (
               <div key={i} style={{
-                padding: "10px 12px", borderRadius: 10, background: T.surf2,
+                padding: "10px 12px", borderRadius: 8, background: T.surf2,
                 border: `1px solid ${p.ok ? T.border : "transparent"}`,
                 display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12,
               }}>
@@ -698,7 +716,7 @@ function WithdrawPanel({ balance, onClose, onConfirm }) {
   return (
     <div style={{
       background: T.surf2, border: `1px solid ${T.borderB}`,
-      borderRadius: 14, padding: "20px 24px", marginBottom: 14,
+      borderRadius: 8, padding: "20px 24px", marginBottom: 14,
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
         <div>
@@ -713,12 +731,12 @@ function WithdrawPanel({ balance, onClose, onConfirm }) {
             <div style={{ fontFamily: T.mono, fontSize: 22, fontWeight: 700, color: T.green }}>{fmt(balance, 4)}</div>
           </div>
           <button onClick={onConfirm} style={{
-            background: T.amber, color: "#0a0a0a", border: "none",
-            borderRadius: 10, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer",
+            background: T.text, color: T.surf, border: "none",
+            borderRadius: 8, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer",
           }}>Confirm</button>
           <button onClick={onClose} style={{
             background: T.surf, color: T.muted, border: `1px solid ${T.border}`,
-            borderRadius: 10, padding: "10px 14px", fontSize: 13, cursor: "pointer",
+            borderRadius: 8, padding: "10px 14px", fontSize: 13, cursor: "pointer",
           }}>✕</button>
         </div>
       </div>
@@ -727,11 +745,53 @@ function WithdrawPanel({ balance, onClose, onConfirm }) {
 }
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
-export default function StreamPayDashboard() {
+function WalletStatus({ wallet, onConnect }) {
+  const connected = Boolean(wallet.address);
+  const busy = wallet.status === "connecting";
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 10,
+      padding: "6px 8px 6px 10px", border: `1px solid ${connected ? T.greenMid : T.border}`,
+      borderRadius: 8, background: connected ? T.greenDim : T.surf2,
+      minHeight: 34,
+    }}>
+      <Dot color={connected ? T.green : T.amber} pulse={connected || busy} />
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 10, color: T.muted, lineHeight: 1 }}>Crossmark</div>
+        <div style={{
+          fontFamily: T.mono, fontSize: 11, color: connected ? T.green : T.text,
+          maxWidth: 132, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>
+          {connected ? shortAddress(wallet.address) : wallet.status}
+        </div>
+      </div>
+      <button
+        onClick={onConnect}
+        disabled={busy}
+        style={{
+          border: "none", borderRadius: 7, padding: "6px 10px",
+          background: connected ? T.surf3 : T.green, color: connected ? T.text : T.bg,
+          fontSize: 11, fontWeight: 700, cursor: busy ? "wait" : "pointer",
+        }}
+      >
+        {busy ? "Connecting" : connected ? "Switch" : "Connect"}
+      </button>
+    </div>
+  );
+}
+
+export default function CadenceDashboard() {
   const [tick, setTick]             = useState(0);
   const [balance, setBalance]       = useState(INIT_BAL);
   const [tab, setTab]               = useState("worker");
   const [showWithdraw, setShow]     = useState(false);
+  const [wallet, setWallet]         = useState({
+    status: "not connected",
+    address: "",
+    error: "",
+    lastTx: null,
+  });
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -744,6 +804,51 @@ export default function StreamPayDashboard() {
   const handleWithdrawConfirm = () => {
     setBalance(0);
     setShow(false);
+  };
+
+  const connectCrossmark = async () => {
+    setWallet((prev) => ({ ...prev, status: "connecting", error: "" }));
+
+    try {
+      const result = await crossmark.methods.signInAndWait();
+      const address = getCrossmarkAddress(result);
+
+      if (!address) {
+        throw new Error("Crossmark did not return an active XRPL address.");
+      }
+
+      setWallet({
+        status: "connected",
+        address,
+        error: "",
+        lastTx: null,
+      });
+      return address;
+    } catch (error) {
+      setWallet((prev) => ({
+        ...prev,
+        status: "connect failed",
+        error: error?.message || "Crossmark connection was cancelled.",
+      }));
+      return "";
+    }
+  };
+
+  const submitCrossmarkPayment = async ({ destination, amountDrops = "1000000" }) => {
+    const account = wallet.address || await connectCrossmark();
+    if (!account) return null;
+
+    const result = await crossmark.methods.signAndSubmitAndWait({
+      TransactionType: "Payment",
+      Account: account,
+      Destination: destination,
+      Amount: amountDrops,
+    });
+    const tx = getCrossmarkTx(result);
+
+    setWallet((prev) => ({ ...prev, lastTx: tx }));
+
+    return tx;
   };
 
   return (
@@ -772,8 +877,8 @@ export default function StreamPayDashboard() {
             <div style={{ display: "flex", gap: 6 }}>
               {[
                 { id: "worker",   label: "Worker" },
-                { id: "employer", label: "Employer" },
-                { id: "nullmark", label: "Nullmark" },
+                { id: "employer", label: "Treasury" },
+                { id: "nullmark", label: "Proofs" },
               ].map(t => (
                 <button key={t.id} onClick={() => setTab(t.id)} style={{
                   padding: "6px 14px", borderRadius: 8, border: "none", cursor: "pointer",
@@ -785,7 +890,8 @@ export default function StreamPayDashboard() {
               ))}
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <Pill label="XRPL Mainnet" color={T.green} />
+              <Pill label="Crossmark ready" color={T.green} />
+              <WalletStatus wallet={wallet} onConnect={connectCrossmark} />
               <div style={{ fontFamily: T.mono, fontSize: 11, color: T.muted }}>
                 {new Date().toLocaleTimeString()}
               </div>
@@ -803,7 +909,7 @@ export default function StreamPayDashboard() {
             )}
             {tab === "worker"   && <WorkerView   balance={balance} tick={tick} onWithdraw={() => setShow(true)} />}
             {tab === "employer" && <EmployerView />}
-            {tab === "nullmark" && <NullmarkView />}
+            {tab === "nullmark" && <ProofsView />}
           </div>
         </div>
       </div>
