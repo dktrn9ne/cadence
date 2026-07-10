@@ -29,13 +29,19 @@ const T = {
 };
 
 // ─── Domain constants ────────────────────────────────────────────────────────
-const SALARY   = 60000;
+const SALARY   = 0;
 const PER_SEC  = SALARY / (365 * 24 * 3600);
 const PER_MIN  = PER_SEC * 60;
 const CADENCE  = 300;                      // seconds between XRPL settlements
 const BIWEEKLY = SALARY / 26;
-const HOURS_IN = 4.5;
+const HOURS_IN = 0;
 const INIT_BAL = PER_SEC * HOURS_IN * 3600;
+const CADENCE_SOURCE_TAG = 2606250005;
+const RLUSD_CURRENCY = "524C555344000000000000000000000000000000";
+const RLUSD_ISSUER = "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De";
+const DEFAULT_RLUSD_WITHDRAW_AMOUNT = "0.01";
+const DEFAULT_TREASURY_ADDRESS = "rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864";
+const DEFAULT_WORKER_ADDRESS = "rBKBuortXq4PYQFH768fzLZXJ1EZWhwbbi";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const fmt = (n, d = 2) => {
@@ -68,6 +74,18 @@ const getCrossmarkTx = (result) =>
   result?.data?.resp ||
   {};
 
+const getTxHash = (tx) =>
+  tx?.hash ||
+  tx?.tx_json?.hash ||
+  tx?.tx?.hash ||
+  tx?.transaction?.hash ||
+  "";
+
+const withCadenceSourceTag = (transaction) => ({
+  ...transaction,
+  SourceTag: CADENCE_SOURCE_TAG,
+});
+
 function genChart(bal) {
   return Array.from({ length: 60 }, (_, i) => {
     const secsAgo = (59 - i) * 60;
@@ -77,26 +95,14 @@ function genChart(bal) {
   });
 }
 
-const INIT_TXS = Array.from({ length: 5 }, (_, i) => ({
-  h: hash(),
-  amt: PER_SEC * CADENCE,
-  label: i === 0 ? "5 min ago" : `${(i + 1) * 5} min ago`,
-  fresh: false,
-}));
+const INIT_TXS = [];
 
 const WORKERS = [
-  { id: 1, name: "Jordan M.",  role: "Engineer",   salary: 95000,  active: true  },
-  { id: 2, name: "Aaliyah R.", role: "Designer",   salary: 80000,  active: true  },
-  { id: 3, name: "Carlos P.",  role: "Product",    salary: 110000, active: true  },
-  { id: 4, name: "Simone W.",  role: "Operations", salary: 65000,  active: false },
+  { id: 1, name: "Treasury", role: "Payer", salary: 0, active: true },
+  { id: 2, name: "Worker", role: "Payee", salary: 0, active: true },
 ];
 
-const PROOFS = [
-  { level: "Earns > $50K / yr",      hash: hash(), date: "May 7, 2026",  chain: "zkVerify", ok: true },
-  { level: "90+ days continuous",     hash: hash(), date: "May 1, 2026",  chain: "zkVerify", ok: true },
-  { level: "Earns > $40K / yr",      hash: hash(), date: "Apr 15, 2026", chain: "zkVerify", ok: true },
-  { level: "180+ days continuous",    hash: null,   date: "Pending…",     chain: "—",        ok: false },
-];
+const PROOFS = [];
 
 // ─── Primitives ───────────────────────────────────────────────────────────────
 function Dot({ color, pulse }) {
@@ -256,9 +262,9 @@ function Sidebar({ tab, setTab }) {
 // ─── Worker view ──────────────────────────────────────────────────────────────
 function WorkerView({ balance, tick, onWithdraw }) {
   const [chartData, setChartData] = useState(() => genChart(INIT_BAL));
-  const [txs, setTxs] = useState(INIT_TXS);
-  const [withdrawn, setWithdrawn] = useState(285.4);
-  const [wCount, setWCount] = useState(3);
+  const [txs] = useState(INIT_TXS);
+  const [withdrawn] = useState(0);
+  const [wCount] = useState(0);
 
   useEffect(() => {
     if (tick > 0 && tick % 60 === 0) {
@@ -268,17 +274,11 @@ function WorkerView({ balance, tick, onWithdraw }) {
         { t: d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), b: balance },
       ]);
     }
-    if (tick > 0 && tick % CADENCE === 0) {
-      setTxs(prev => [
-        { h: hash(), amt: PER_SEC * CADENCE, label: "just now", fresh: true },
-        ...prev.map(tx => ({ ...tx, fresh: false })).slice(0, 7),
-      ]);
-    }
   }, [tick]);
 
   const earnedToday = PER_SEC * (HOURS_IN * 3600 + tick);
-  const periodEarned = BIWEEKLY * 0.35 + earnedToday * 0.12;
-  const pct = Math.min(100, (periodEarned / BIWEEKLY) * 100);
+  const periodEarned = 0;
+  const pct = BIWEEKLY > 0 ? Math.min(100, (periodEarned / BIWEEKLY) * 100) : 0;
   const nextTx = CADENCE - (tick % CADENCE);
   const mm = String(Math.floor(nextTx / 60)).padStart(2, "0");
   const ss = String(nextTx % 60).padStart(2, "0");
@@ -397,6 +397,14 @@ function WorkerView({ balance, tick, onWithdraw }) {
         <Card style={{ padding: "18px", display: "flex", flexDirection: "column", gap: 8 }}>
           <SectionLabel>Settlement receipts</SectionLabel>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1 }}>
+            {txs.length === 0 && (
+              <div style={{
+                padding: "18px 12px", borderRadius: 8, background: T.surf2,
+                color: T.muted, fontSize: 11, textAlign: "center",
+              }}>
+                No settlements yet
+              </div>
+            )}
             {txs.slice(0, 5).map((tx, i) => (
               <div key={i} style={{
                 display: "flex", justifyContent: "space-between", alignItems: "center",
@@ -431,20 +439,12 @@ function WorkerView({ balance, tick, onWithdraw }) {
           <Pill label="HTTP-native" color={T.blue} />
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
-          {[
-            { label: "Rent / housing",   rate: "$47.95 / day",    status: "active",  color: T.green },
-            { label: "Utilities",         rate: "$3.20 / day",     status: "active",  color: T.green },
-            { label: "Subscriptions",     rate: "$2.99 / month",   status: "pending", color: T.amber },
-          ].map(item => (
-            <div key={item.label} style={{
-              background: T.surf2, borderRadius: 8, padding: "12px 14px",
-              border: `1px solid ${item.color}18`,
-            }}>
-              <div style={{ fontSize: 10, color: T.muted, marginBottom: 5 }}>{item.label}</div>
-              <div style={{ fontFamily: T.mono, fontSize: 14, color: item.color, fontWeight: 700, marginBottom: 4 }}>{item.rate}</div>
-              <div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.06em", color: item.color + "99" }}>{item.status}</div>
-            </div>
-          ))}
+          <div style={{
+            gridColumn: "1 / -1", background: T.surf2, borderRadius: 8,
+            padding: "12px 14px", color: T.muted, fontSize: 11, textAlign: "center",
+          }}>
+            No pay rails configured
+          </div>
         </div>
       </Card>
     </div>
@@ -454,9 +454,9 @@ function WorkerView({ balance, tick, onWithdraw }) {
 // ─── Employer view ────────────────────────────────────────────────────────────
 function EmployerView() {
   const [workers, setWorkers] = useState(WORKERS);
-  const poolBalance = 8450.0;
+  const poolBalance = 0;
   const dailyBurn = workers.filter(w => w.active).reduce((s, w) => s + w.salary / 365, 0);
-  const runway = poolBalance / dailyBurn;
+  const runway = dailyBurn > 0 ? poolBalance / dailyBurn : 0;
 
   const toggle = (id) => setWorkers(prev => prev.map(w => w.id === id ? { ...w, active: !w.active } : w));
 
@@ -504,7 +504,7 @@ function EmployerView() {
           { label: "Active workers",     value: workers.filter(w => w.active).length + ` of ${workers.length}`, color: T.green },
           { label: "Daily burn",         value: fmt(dailyBurn),                                                  color: T.amber },
           { label: "Settled this period",value: fmt(dailyBurn * 7),                                              color: T.blue  },
-          { label: "Avg salary",         value: fmt(workers.reduce((s,w) => s+w.salary,0)/workers.length, 0),   color: T.text  },
+          { label: "Avg salary",         value: fmt(workers.length ? workers.reduce((s,w) => s+w.salary,0)/workers.length : 0, 0), color: T.text  },
         ].map(s => (
           <div key={s.label} style={{
             flex: 1, minWidth: 100, background: T.surf, border: `1px solid ${T.border}`,
@@ -613,8 +613,8 @@ function ProofsView() {
             </div>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "flex-end" }}>
-            <Pill label="3 proofs verified" color={T.green} />
-            <Pill label="1 pending" color={T.amber} />
+            <Pill label="0 proofs verified" color={T.green} />
+            <Pill label="0 pending" color={T.amber} />
           </div>
         </div>
       </Card>
@@ -625,6 +625,14 @@ function ProofsView() {
         <Card style={{ padding: "18px" }}>
           <SectionLabel>ZK proof history</SectionLabel>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {PROOFS.length === 0 && (
+              <div style={{
+                padding: "18px 12px", borderRadius: 8, background: T.surf2,
+                color: T.muted, fontSize: 11, textAlign: "center",
+              }}>
+                No proofs posted yet
+              </div>
+            )}
             {PROOFS.map((p, i) => (
               <div key={i} style={{
                 padding: "10px 12px", borderRadius: 8, background: T.surf2,
@@ -654,9 +662,9 @@ function ProofsView() {
             <SectionLabel>Credit impact</SectionLabel>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {[
-                { label: "Loan approval likelihood", delta: "+23%", color: T.green },
-                { label: "Rental application strength", delta: "+31%", color: T.green },
-                { label: "Income verification time", delta: "−90%", color: T.blue },
+                { label: "Loan approval likelihood", delta: "0%", color: T.muted },
+                { label: "Rental application strength", delta: "0%", color: T.muted },
+                { label: "Income verification time", delta: "0%", color: T.muted },
               ].map(item => (
                 <div key={item.label} style={{
                   display: "flex", justifyContent: "space-between", alignItems: "center",
@@ -698,12 +706,12 @@ function ProofsView() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
           <div>
             <SectionLabel>Latest attestation · zkVerify</SectionLabel>
-            <div style={{ fontFamily: T.mono, fontSize: 12, color: T.purple }}>{shortHash(PROOFS[0].hash)}</div>
-            <div style={{ fontSize: 11, color: T.muted, marginTop: 4 }}>Posted May 7, 2026 · SecretVM v2.1 · XRPL block #89,441,027</div>
+            <div style={{ fontFamily: T.mono, fontSize: 12, color: T.muted }}>No attestation yet</div>
+            <div style={{ fontSize: 11, color: T.muted, marginTop: 4 }}>Submit a mainnet settlement before posting proof data.</div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <Pill label="TEE attested" color={T.purple} />
-            <Pill label="On-chain" color={T.green} />
+            <Pill label="TEE pending" color={T.purple} />
+            <Pill label="On-chain pending" color={T.green} />
           </div>
         </div>
       </Card>
@@ -745,6 +753,118 @@ function WithdrawPanel({ balance, onClose, onConfirm }) {
 }
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
+function SettlementPanel({
+  balance,
+  onClose,
+  onConfirm,
+  workerAddress,
+  setWorkerAddress,
+  rlusdAmount,
+  setRlusdAmount,
+  settlementStatus,
+  wallet,
+}) {
+  const busy = settlementStatus.state === "submitting";
+  const txHash = getTxHash(wallet.lastTx);
+
+  return (
+    <div style={{
+      background: T.surf2, border: `1px solid ${T.borderB}`,
+      borderRadius: 8, padding: "20px 24px", marginBottom: 14,
+    }}>
+      <form onSubmit={onConfirm} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 4 }}>Settle RLUSD</div>
+            <div style={{ fontSize: 12, color: T.muted }}>
+              Crossmark signs an XRPL mainnet payment from treasury to worker.
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 10, color: T.muted, marginBottom: 3 }}>Available</div>
+              <div style={{ fontFamily: T.mono, fontSize: 22, fontWeight: 700, color: T.green }}>{fmt(balance, 4)}</div>
+            </div>
+            <button type="submit" disabled={busy} style={{
+              background: T.text, color: T.surf, border: "none",
+              borderRadius: 8, padding: "10px 20px", fontSize: 13,
+              fontWeight: 700, cursor: busy ? "wait" : "pointer", opacity: busy ? 0.7 : 1,
+            }}>
+              {busy ? "Submitting" : "Submit"}
+            </button>
+            <button type="button" onClick={onClose} style={{
+              background: T.surf, color: T.muted, border: `1px solid ${T.border}`,
+              borderRadius: 8, padding: "10px 14px", fontSize: 13, cursor: "pointer",
+            }}>Close</button>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(220px, 1fr) 160px", gap: 10 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: T.muted }}>
+              Worker address
+            </span>
+            <input
+              value={workerAddress}
+              onChange={(event) => setWorkerAddress(event.target.value.trim())}
+              placeholder="r..."
+              style={{
+                width: "100%", border: `1px solid ${T.border}`, background: T.surf,
+                color: T.text, borderRadius: 8, padding: "10px 12px",
+                fontFamily: T.mono, fontSize: 12, outline: "none",
+              }}
+            />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: T.muted }}>
+              RLUSD
+            </span>
+            <input
+              value={rlusdAmount}
+              onChange={(event) => setRlusdAmount(event.target.value)}
+              inputMode="decimal"
+              style={{
+                width: "100%", border: `1px solid ${T.border}`, background: T.surf,
+                color: T.text, borderRadius: 8, padding: "10px 12px",
+                fontFamily: T.mono, fontSize: 12, outline: "none",
+              }}
+            />
+          </label>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <Pill label={`SourceTag ${CADENCE_SOURCE_TAG}`} color={T.blue} />
+          <Pill label="RLUSD" color={T.green} />
+          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.muted }}>
+            Treasury {shortAddress(DEFAULT_TREASURY_ADDRESS)}
+          </span>
+        </div>
+
+        {(settlementStatus.message || wallet.error || txHash) && (
+          <div style={{
+            padding: "10px 12px", borderRadius: 8, background: T.surf,
+            border: `1px solid ${settlementStatus.state === "error" || wallet.error ? T.amberDim : T.border}`,
+            color: settlementStatus.state === "error" || wallet.error ? T.amber : T.muted,
+            fontSize: 12,
+          }}>
+            {settlementStatus.message || wallet.error}
+            {txHash && (
+              <a
+                href={`https://xrpscan.com/tx/${txHash}`}
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: T.green, marginLeft: 8, fontFamily: T.mono }}
+              >
+                {shortHash(txHash)}
+              </a>
+            )}
+          </div>
+        )}
+      </form>
+    </div>
+  );
+}
+
 function WalletStatus({ wallet, onConnect }) {
   const connected = Boolean(wallet.address);
   const busy = wallet.status === "connecting";
@@ -786,6 +906,9 @@ export default function CadenceDashboard() {
   const [balance, setBalance]       = useState(INIT_BAL);
   const [tab, setTab]               = useState("worker");
   const [showWithdraw, setShow]     = useState(false);
+  const [workerAddress, setWorkerAddress] = useState(DEFAULT_WORKER_ADDRESS);
+  const [rlusdAmount, setRlusdAmount] = useState(DEFAULT_RLUSD_WITHDRAW_AMOUNT);
+  const [settlementStatus, setSettlementStatus] = useState({ state: "idle", message: "" });
   const [wallet, setWallet]         = useState({
     status: "not connected",
     address: "",
@@ -801,9 +924,40 @@ export default function CadenceDashboard() {
     return () => clearInterval(id);
   }, []);
 
-  const handleWithdrawConfirm = () => {
-    setBalance(0);
-    setShow(false);
+  const handleWithdrawConfirm = async (event) => {
+    event.preventDefault();
+
+    const amount = Number(rlusdAmount);
+    if (!workerAddress || !workerAddress.startsWith("r")) {
+      setSettlementStatus({ state: "error", message: "Enter a valid XRPL worker address." });
+      return;
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setSettlementStatus({ state: "error", message: "Enter an RLUSD amount greater than zero." });
+      return;
+    }
+
+    setSettlementStatus({ state: "submitting", message: "Confirm the RLUSD payment in Crossmark." });
+
+    try {
+      const tx = await submitCrossmarkPayment({
+        destination: workerAddress,
+        amountValue: rlusdAmount,
+      });
+
+      if (!tx) {
+        setSettlementStatus({ state: "error", message: "Crossmark did not return a submitted transaction." });
+        return;
+      }
+
+      setBalance(0);
+      setSettlementStatus({ state: "success", message: "RLUSD settlement submitted with the Cadence source tag." });
+    } catch (error) {
+      setSettlementStatus({
+        state: "error",
+        message: error?.message || "Crossmark payment failed.",
+      });
+    }
   };
 
   const connectCrossmark = async () => {
@@ -834,16 +988,23 @@ export default function CadenceDashboard() {
     }
   };
 
-  const submitCrossmarkPayment = async ({ destination, amountDrops = "1000000" }) => {
-    const account = wallet.address || await connectCrossmark();
-    if (!account) return null;
+  const submitCrossmarkPayment = async ({ destination, amountValue }) => {
+    const account = wallet.address || DEFAULT_TREASURY_ADDRESS;
 
-    const result = await crossmark.methods.signAndSubmitAndWait({
+    if (wallet.address && account !== DEFAULT_TREASURY_ADDRESS) {
+      throw new Error(`Connect the treasury wallet ${shortAddress(DEFAULT_TREASURY_ADDRESS)} before submitting.`);
+    }
+
+    const result = await crossmark.methods.signAndSubmitAndWait(withCadenceSourceTag({
       TransactionType: "Payment",
       Account: account,
       Destination: destination,
-      Amount: amountDrops,
-    });
+      Amount: {
+        currency: RLUSD_CURRENCY,
+        issuer: RLUSD_ISSUER,
+        value: amountValue,
+      },
+    }));
     const tx = getCrossmarkTx(result);
 
     setWallet((prev) => ({ ...prev, lastTx: tx }));
@@ -901,10 +1062,16 @@ export default function CadenceDashboard() {
           {/* Main scroll area */}
           <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
             {showWithdraw && (
-              <WithdrawPanel
+              <SettlementPanel
                 balance={balance}
                 onClose={() => setShow(false)}
                 onConfirm={handleWithdrawConfirm}
+                workerAddress={workerAddress}
+                setWorkerAddress={setWorkerAddress}
+                rlusdAmount={rlusdAmount}
+                setRlusdAmount={setRlusdAmount}
+                settlementStatus={settlementStatus}
+                wallet={wallet}
               />
             )}
             {tab === "worker"   && <WorkerView   balance={balance} tick={tick} onWithdraw={() => setShow(true)} />}
