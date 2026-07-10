@@ -42,6 +42,8 @@ const RLUSD_ISSUER = "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De";
 const DEFAULT_RLUSD_WITHDRAW_AMOUNT = "0.01";
 const DEFAULT_TREASURY_ADDRESS = "rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864";
 const DEFAULT_WORKER_ADDRESS = "rBKBuortXq4PYQFH768fzLZXJ1EZWhwbbi";
+const XRPL_MAINNET_WSS = "wss://s1.ripple.com";
+const STREAM_INTERVAL_MS = 15000;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const fmt = (n, d = 2) => {
@@ -85,6 +87,55 @@ const withCadenceSourceTag = (transaction) => ({
   ...transaction,
   SourceTag: CADENCE_SOURCE_TAG,
 });
+
+const normalizeAmount = (value, decimals = 6) => {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount <= 0) return "";
+  return amount.toFixed(decimals).replace(/\.?0+$/, "");
+};
+
+const isRlusdCurrency = (currency) =>
+  currency === RLUSD_CURRENCY || currency === "RLUSD";
+
+const xrplRequest = (request) =>
+  new Promise((resolve, reject) => {
+    const socket = new WebSocket(XRPL_MAINNET_WSS);
+    const timer = window.setTimeout(() => {
+      socket.close();
+      reject(new Error("Timed out while reading XRPL mainnet."));
+    }, 12000);
+
+    socket.addEventListener("open", () => {
+      socket.send(JSON.stringify({ id: Date.now(), ...request }));
+    });
+    socket.addEventListener("message", (event) => {
+      window.clearTimeout(timer);
+      socket.close();
+      const response = JSON.parse(event.data);
+      if (response.status === "error" || response.error) {
+        reject(new Error(response.error_message || response.error || "XRPL request failed."));
+        return;
+      }
+      resolve(response.result);
+    });
+    socket.addEventListener("error", () => {
+      window.clearTimeout(timer);
+      reject(new Error("Could not connect to XRPL mainnet."));
+    });
+  });
+
+const fetchTreasuryRlusdBalance = async () => {
+  const result = await xrplRequest({
+    command: "account_lines",
+    account: DEFAULT_TREASURY_ADDRESS,
+    peer: RLUSD_ISSUER,
+    ledger_index: "validated",
+  });
+  const line = result.lines?.find((item) =>
+    isRlusdCurrency(item.currency) && item.account === RLUSD_ISSUER
+  );
+  return Math.max(0, Number(line?.balance || 0));
+};
 
 function genChart(bal) {
   return Array.from({ length: 60 }, (_, i) => {
@@ -763,9 +814,15 @@ function SettlementPanel({
   setRlusdAmount,
   settlementStatus,
   wallet,
+  treasuryRlusdBalance,
+  onRefreshBalance,
+  onStartStream,
+  onStopStream,
+  isStreaming,
 }) {
   const busy = settlementStatus.state === "submitting";
   const txHash = getTxHash(wallet.lastTx);
+  const visibleBalance = treasuryRlusdBalance == null ? "..." : fmt(treasuryRlusdBalance, 6);
 
   return (
     <div style={{
@@ -782,15 +839,15 @@ function SettlementPanel({
           </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             <div style={{ textAlign: "right" }}>
-              <div style={{ fontSize: 10, color: T.muted, marginBottom: 3 }}>Available</div>
-              <div style={{ fontFamily: T.mono, fontSize: 22, fontWeight: 700, color: T.green }}>{fmt(balance, 4)}</div>
+              <div style={{ fontSize: 10, color: T.muted, marginBottom: 3 }}>Treasury RLUSD</div>
+              <div style={{ fontFamily: T.mono, fontSize: 22, fontWeight: 700, color: T.green }}>{visibleBalance}</div>
             </div>
             <button type="submit" disabled={busy} style={{
               background: T.text, color: T.surf, border: "none",
               borderRadius: 8, padding: "10px 20px", fontSize: 13,
               fontWeight: 700, cursor: busy ? "wait" : "pointer", opacity: busy ? 0.7 : 1,
             }}>
-              {busy ? "Submitting" : "Submit"}
+              {busy ? "Submitting" : "Send once"}
             </button>
             <button type="button" onClick={onClose} style={{
               background: T.surf, color: T.muted, border: `1px solid ${T.border}`,
@@ -835,8 +892,36 @@ function SettlementPanel({
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <Pill label={`SourceTag ${CADENCE_SOURCE_TAG}`} color={T.blue} />
           <Pill label="RLUSD" color={T.green} />
+          <Pill label="15 sec stream" color={isStreaming ? T.green : T.muted} />
           <span style={{ fontFamily: T.mono, fontSize: 10, color: T.muted }}>
             Treasury {shortAddress(DEFAULT_TREASURY_ADDRESS)}
+          </span>
+        </div>
+
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <button type="button" onClick={onRefreshBalance} disabled={busy} style={{
+            background: T.surf, color: T.text, border: `1px solid ${T.border}`,
+            borderRadius: 8, padding: "9px 14px", fontSize: 12, fontWeight: 700,
+            cursor: busy ? "wait" : "pointer",
+          }}>
+            Refresh balance
+          </button>
+          <button type="button" onClick={onStartStream} disabled={busy || isStreaming} style={{
+            background: isStreaming ? T.dim : T.green, color: isStreaming ? T.muted : T.bg,
+            border: "none", borderRadius: 8, padding: "9px 14px", fontSize: 12,
+            fontWeight: 700, cursor: busy || isStreaming ? "wait" : "pointer",
+          }}>
+            Start 15s stream
+          </button>
+          <button type="button" onClick={onStopStream} disabled={!isStreaming} style={{
+            background: T.surf, color: isStreaming ? T.amber : T.muted,
+            border: `1px solid ${T.border}`, borderRadius: 8, padding: "9px 14px",
+            fontSize: 12, fontWeight: 700, cursor: isStreaming ? "pointer" : "default",
+          }}>
+            Stop
+          </button>
+          <span style={{ fontSize: 11, color: T.muted }}>
+            Sends up to the RLUSD amount above every 15 seconds until the treasury balance is empty.
           </span>
         </div>
 
@@ -909,6 +994,10 @@ export default function CadenceDashboard() {
   const [workerAddress, setWorkerAddress] = useState(DEFAULT_WORKER_ADDRESS);
   const [rlusdAmount, setRlusdAmount] = useState(DEFAULT_RLUSD_WITHDRAW_AMOUNT);
   const [settlementStatus, setSettlementStatus] = useState({ state: "idle", message: "" });
+  const [treasuryRlusdBalance, setTreasuryRlusdBalance] = useState(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const streamTimerRef = useRef(null);
+  const streamActiveRef = useRef(false);
   const [wallet, setWallet]         = useState({
     status: "not connected",
     address: "",
@@ -924,33 +1013,134 @@ export default function CadenceDashboard() {
     return () => clearInterval(id);
   }, []);
 
-  const handleWithdrawConfirm = async (event) => {
-    event.preventDefault();
+  useEffect(() => () => {
+    streamActiveRef.current = false;
+    window.clearTimeout(streamTimerRef.current);
+  }, []);
 
+  const stopRlusdStream = (message = "RLUSD stream stopped.") => {
+    streamActiveRef.current = false;
+    window.clearTimeout(streamTimerRef.current);
+    streamTimerRef.current = null;
+    setIsStreaming(false);
+    setSettlementStatus((prev) => ({
+      state: prev.state === "error" ? "error" : "idle",
+      message,
+    }));
+  };
+
+  const refreshTreasuryBalance = async ({ silent = false } = {}) => {
+    if (!silent) {
+      setSettlementStatus({ state: "submitting", message: "Reading treasury RLUSD balance from XRPL mainnet." });
+    }
+
+    const nextBalance = await fetchTreasuryRlusdBalance();
+    setTreasuryRlusdBalance(nextBalance);
+
+    if (!silent) {
+      setSettlementStatus({ state: "idle", message: `Treasury balance: ${fmt(nextBalance, 6)} RLUSD.` });
+    }
+
+    return nextBalance;
+  };
+
+  const validateSettlementInputs = () => {
     const amount = Number(rlusdAmount);
     if (!workerAddress || !workerAddress.startsWith("r")) {
-      setSettlementStatus({ state: "error", message: "Enter a valid XRPL worker address." });
-      return;
+      throw new Error("Enter a valid XRPL worker address.");
     }
     if (!Number.isFinite(amount) || amount <= 0) {
-      setSettlementStatus({ state: "error", message: "Enter an RLUSD amount greater than zero." });
-      return;
+      throw new Error("Enter an RLUSD amount greater than zero.");
+    }
+    return amount;
+  };
+
+  const sendSettlement = async (amountValue) => {
+    const tx = await submitCrossmarkPayment({
+      destination: workerAddress,
+      amountValue,
+    });
+
+    if (!tx) {
+      throw new Error("Crossmark did not return a submitted transaction.");
     }
 
-    setSettlementStatus({ state: "submitting", message: "Confirm the RLUSD payment in Crossmark." });
+    setBalance(0);
+    return tx;
+  };
+
+  const runRlusdStreamTick = async () => {
+    if (!streamActiveRef.current) return;
 
     try {
-      const tx = await submitCrossmarkPayment({
-        destination: workerAddress,
-        amountValue: rlusdAmount,
-      });
-
-      if (!tx) {
-        setSettlementStatus({ state: "error", message: "Crossmark did not return a submitted transaction." });
+      const requestedAmount = validateSettlementInputs();
+      const availableBalance = await refreshTreasuryBalance({ silent: true });
+      if (availableBalance <= 0) {
+        stopRlusdStream("Treasury RLUSD balance is empty. Stream stopped.");
         return;
       }
 
-      setBalance(0);
+      const amountToSend = normalizeAmount(Math.min(requestedAmount, availableBalance));
+      if (!amountToSend) {
+        stopRlusdStream("No spendable RLUSD balance remains. Stream stopped.");
+        return;
+      }
+
+      setSettlementStatus({
+        state: "submitting",
+        message: `Confirm ${amountToSend} RLUSD in Crossmark. Next stream attempt waits 15 seconds after this one finishes.`,
+      });
+      await sendSettlement(amountToSend);
+
+      const remainingBalance = await refreshTreasuryBalance({ silent: true });
+      setSettlementStatus({
+        state: "success",
+        message: `Stream sent ${amountToSend} RLUSD. Remaining treasury balance: ${fmt(remainingBalance, 6)} RLUSD.`,
+      });
+
+      if (remainingBalance <= 0) {
+        stopRlusdStream("Treasury RLUSD balance is empty. Stream stopped.");
+        return;
+      }
+
+      streamTimerRef.current = window.setTimeout(runRlusdStreamTick, STREAM_INTERVAL_MS);
+    } catch (error) {
+      streamActiveRef.current = false;
+      window.clearTimeout(streamTimerRef.current);
+      streamTimerRef.current = null;
+      setIsStreaming(false);
+      setSettlementStatus({
+        state: "error",
+        message: error?.message || "RLUSD stream failed.",
+      });
+    }
+  };
+
+  const startRlusdStream = async () => {
+    try {
+      validateSettlementInputs();
+      streamActiveRef.current = true;
+      setIsStreaming(true);
+      window.clearTimeout(streamTimerRef.current);
+      await runRlusdStreamTick();
+    } catch (error) {
+      streamActiveRef.current = false;
+      setIsStreaming(false);
+      setSettlementStatus({
+        state: "error",
+        message: error?.message || "Could not start RLUSD stream.",
+      });
+    }
+  };
+
+  const handleWithdrawConfirm = async (event) => {
+    event.preventDefault();
+
+    try {
+      validateSettlementInputs();
+      setSettlementStatus({ state: "submitting", message: "Confirm the RLUSD payment in Crossmark." });
+      await sendSettlement(normalizeAmount(rlusdAmount));
+      await refreshTreasuryBalance({ silent: true });
       setSettlementStatus({ state: "success", message: "RLUSD settlement submitted with the Cadence source tag." });
     } catch (error) {
       setSettlementStatus({
@@ -1064,7 +1254,10 @@ export default function CadenceDashboard() {
             {showWithdraw && (
               <SettlementPanel
                 balance={balance}
-                onClose={() => setShow(false)}
+                onClose={() => {
+                  if (isStreaming) stopRlusdStream();
+                  setShow(false);
+                }}
                 onConfirm={handleWithdrawConfirm}
                 workerAddress={workerAddress}
                 setWorkerAddress={setWorkerAddress}
@@ -1072,9 +1265,33 @@ export default function CadenceDashboard() {
                 setRlusdAmount={setRlusdAmount}
                 settlementStatus={settlementStatus}
                 wallet={wallet}
+                treasuryRlusdBalance={treasuryRlusdBalance}
+                onRefreshBalance={() => refreshTreasuryBalance().catch((error) => {
+                  setSettlementStatus({
+                    state: "error",
+                    message: error?.message || "Could not refresh treasury balance.",
+                  });
+                })}
+                onStartStream={startRlusdStream}
+                onStopStream={() => stopRlusdStream()}
+                isStreaming={isStreaming}
               />
             )}
-            {tab === "worker"   && <WorkerView   balance={balance} tick={tick} onWithdraw={() => setShow(true)} />}
+            {tab === "worker"   && (
+              <WorkerView
+                balance={balance}
+                tick={tick}
+                onWithdraw={() => {
+                  setShow(true);
+                  refreshTreasuryBalance().catch((error) => {
+                    setSettlementStatus({
+                      state: "error",
+                      message: error?.message || "Could not refresh treasury balance.",
+                    });
+                  });
+                }}
+              />
+            )}
             {tab === "employer" && <EmployerView />}
             {tab === "nullmark" && <ProofsView />}
           </div>
