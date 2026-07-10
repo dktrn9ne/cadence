@@ -503,9 +503,9 @@ function WorkerView({ balance, tick, onWithdraw }) {
 }
 
 // ─── Employer view ────────────────────────────────────────────────────────────
-function EmployerView() {
+function EmployerView({ treasuryRlusdBalance, onRefreshBalance, balanceStatus }) {
   const [workers, setWorkers] = useState(WORKERS);
-  const poolBalance = 0;
+  const poolBalance = treasuryRlusdBalance ?? 0;
   const dailyBurn = workers.filter(w => w.active).reduce((s, w) => s + w.salary / 365, 0);
   const runway = dailyBurn > 0 ? poolBalance / dailyBurn : 0;
 
@@ -540,14 +540,23 @@ function EmployerView() {
               </span>
             </div>
           </div>
-          <button style={{
+          <button onClick={onRefreshBalance} style={{
             background: T.text, color: T.surf, border: "none", borderRadius: 8,
             padding: "11px 24px", fontWeight: 700, fontSize: 13, cursor: "pointer",
           }}>
-            Top up pool
+            Read wallet balance
           </button>
         </div>
       </Card>
+
+      {balanceStatus && (
+        <div style={{
+          padding: "10px 12px", borderRadius: 8, background: T.surf2,
+          border: `1px solid ${T.border}`, color: T.muted, fontSize: 12,
+        }}>
+          {balanceStatus}
+        </div>
+      )}
 
       {/* Stats */}
       <div style={{ display: "flex", gap: 12 }}>
@@ -1044,6 +1053,15 @@ export default function CadenceDashboard() {
     return nextBalance;
   };
 
+  const readTreasuryBalance = () => {
+    refreshTreasuryBalance().catch((error) => {
+      setSettlementStatus({
+        state: "error",
+        message: error?.message || "Could not read treasury wallet balance.",
+      });
+    });
+  };
+
   const validateSettlementInputs = () => {
     const amount = Number(rlusdAmount);
     if (!workerAddress || !workerAddress.startsWith("r")) {
@@ -1266,12 +1284,7 @@ export default function CadenceDashboard() {
                 settlementStatus={settlementStatus}
                 wallet={wallet}
                 treasuryRlusdBalance={treasuryRlusdBalance}
-                onRefreshBalance={() => refreshTreasuryBalance().catch((error) => {
-                  setSettlementStatus({
-                    state: "error",
-                    message: error?.message || "Could not refresh treasury balance.",
-                  });
-                })}
+                onRefreshBalance={readTreasuryBalance}
                 onStartStream={startRlusdStream}
                 onStopStream={() => stopRlusdStream()}
                 isStreaming={isStreaming}
@@ -1283,16 +1296,17 @@ export default function CadenceDashboard() {
                 tick={tick}
                 onWithdraw={() => {
                   setShow(true);
-                  refreshTreasuryBalance().catch((error) => {
-                    setSettlementStatus({
-                      state: "error",
-                      message: error?.message || "Could not refresh treasury balance.",
-                    });
-                  });
+                  readTreasuryBalance();
                 }}
               />
             )}
-            {tab === "employer" && <EmployerView />}
+            {tab === "employer" && (
+              <EmployerView
+                treasuryRlusdBalance={treasuryRlusdBalance}
+                onRefreshBalance={readTreasuryBalance}
+                balanceStatus={settlementStatus.message}
+              />
+            )}
             {tab === "nullmark" && <ProofsView />}
           </div>
         </div>
