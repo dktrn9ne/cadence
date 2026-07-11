@@ -1,115 +1,78 @@
-import { useState, useEffect, useRef } from "react";
-import crossmark from "@crossmarkio/sdk";
-import {
-  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  BarChart, Bar, Cell,
-} from "recharts";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Client, Wallet } from "xrpl";
 
-// ─── Design system ──────────────────────────────────────────────────────────
-const T = {
-  bg:        "#F5F7F4",
-  surf:      "#FFFFFF",
-  surf2:     "#EDF2EF",
-  surf3:     "#E1E8E4",
-  border:    "rgba(22,35,31,0.11)",
-  borderB:   "rgba(22,35,31,0.2)",
-  green:     "#107C66",
-  greenDim:  "rgba(16,124,102,0.09)",
-  greenMid:  "rgba(16,124,102,0.18)",
-  amber:     "#C86632",
-  amberDim:  "rgba(200,102,50,0.11)",
-  blue:      "#2457A6",
-  blueDim:   "rgba(36,87,166,0.1)",
-  purple:    "#6D55B8",
-  purpleDim: "rgba(109,85,184,0.1)",
-  text:      "#13201C",
-  muted:     "#65746F",
-  dim:       "#CBD6D1",
-  mono:      "'Menlo','Monaco','Consolas',monospace",
+const COLORS = {
+  ink: "#24332d",
+  muted: "#708078",
+  paper: "#fbf8f1",
+  card: "#fffdf8",
+  line: "#e7e2d7",
+  mint: "#b9ddcb",
+  mintDark: "#2e6956",
+  coral: "#e8896d",
+  coralDark: "#a8523d",
+  butter: "#f3dda4",
+  sky: "#bdd9e7",
 };
 
-// ─── Domain constants ────────────────────────────────────────────────────────
-const SALARY   = 0;
-const PER_SEC  = SALARY / (365 * 24 * 3600);
-const PER_MIN  = PER_SEC * 60;
-const CADENCE  = 300;                      // seconds between XRPL settlements
-const BIWEEKLY = SALARY / 26;
-const HOURS_IN = 0;
-const INIT_BAL = PER_SEC * HOURS_IN * 3600;
-const CADENCE_SOURCE_TAG = 2606250005;
 const RLUSD_CURRENCY = "524C555344000000000000000000000000000000";
 const RLUSD_ISSUER = "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De";
-const DEFAULT_RLUSD_WITHDRAW_AMOUNT = "0.01";
-const DEFAULT_TREASURY_ADDRESS = "rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864";
-const DEFAULT_WORKER_ADDRESS = "rBKBuortXq4PYQFH768fzLZXJ1EZWhwbbi";
-const XRPL_MAINNET_WSS = "wss://s1.ripple.com";
-const STREAM_INTERVAL_MS = 15000;
+const SOURCE_TAG = 2606250005;
+const LOG_STORAGE_KEY = "cadence-debug-logs-v1";
+const MAX_LOGS = 500;
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-const fmt = (n, d = 2) => {
-  const [whole, fraction] = n.toFixed(d).split(".");
-  const formattedWhole = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `$${formattedWhole}${fraction ? `.${fraction}` : ""}`;
+const ACCESS_METHODS = [
+  { value: "family", label: "XRPL family seed", hint: "Usually starts with s" },
+  { value: "mnemonic", label: "Mnemonic seed phrase", hint: "12 or 24 words" },
+];
+
+const TIME_UNITS = {
+  seconds15: { label: "15 seconds", seconds: 15 },
+  seconds30: { label: "30 seconds", seconds: 30 },
+  minute: { label: "1 minute", seconds: 60 },
+  minutes5: { label: "5 minutes", seconds: 5 * 60 },
+  minutes15: { label: "15 minutes", seconds: 15 * 60 },
+  hour: { label: "1 hour", seconds: 60 * 60 },
+  day: { label: "1 day", seconds: 24 * 60 * 60 },
+  week: { label: "1 week", seconds: 7 * 24 * 60 * 60 },
 };
 
-const hash = () =>
-  Array.from({ length: 64 }, () => "0123456789ABCDEF"[Math.floor(Math.random() * 16)]).join("");
+const FREQUENCIES = ["seconds15", "seconds30", "minute", "minutes5", "minutes15", "hour", "day"];
 
-const shortHash = (h) => h.slice(0, 8) + "…" + h.slice(-6);
+const emptyPerson = {
+  name: "",
+  role: "",
+  email: "",
+  address: "",
+  weeklyPay: "16",
+  frequency: "minute",
+  active: false,
+};
+
+const money = (value, digits = 2) => {
+  const number = Number(value) || 0;
+  return `$${number.toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })}`;
+};
 
 const shortAddress = (address) =>
-  address ? `${address.slice(0, 6)}...${address.slice(-6)}` : "";
-
-const getCrossmarkAddress = (result) =>
-  result?.response?.data?.address ||
-  result?.response?.address ||
-  result?.data?.address ||
-  result?.address ||
-  "";
-
-const getCrossmarkTx = (result) =>
-  result?.response?.data?.resp?.result ||
-  result?.response?.data?.resp ||
-  result?.response?.resp?.result ||
-  result?.response?.resp ||
-  result?.data?.resp?.result ||
-  result?.data?.resp ||
-  {};
-
-const getTxHash = (tx) =>
-  tx?.hash ||
-  tx?.tx_json?.hash ||
-  tx?.tx?.hash ||
-  tx?.transaction?.hash ||
-  "";
-
-const withCadenceSourceTag = (transaction) => ({
-  ...transaction,
-  SourceTag: CADENCE_SOURCE_TAG,
-});
-
-const normalizeAmount = (value, decimals = 6) => {
-  const amount = Number(value);
-  if (!Number.isFinite(amount) || amount <= 0) return "";
-  return amount.toFixed(decimals).replace(/\.?0+$/, "");
-};
-
-const isRlusdCurrency = (currency) =>
-  currency === RLUSD_CURRENCY || currency === "RLUSD";
+  address ? `${address.slice(0, 7)}...${address.slice(-5)}` : "Not added yet";
 
 const xrplRequest = (request) =>
   new Promise((resolve, reject) => {
-    const socket = new WebSocket(XRPL_MAINNET_WSS);
-    const timer = window.setTimeout(() => {
+    const socket = new WebSocket("wss://s1.ripple.com");
+    const timeout = window.setTimeout(() => {
       socket.close();
-      reject(new Error("Timed out while reading XRPL mainnet."));
+      reject(new Error("The XRPL balance check timed out."));
     }, 12000);
 
     socket.addEventListener("open", () => {
       socket.send(JSON.stringify({ id: Date.now(), ...request }));
     });
     socket.addEventListener("message", (event) => {
-      window.clearTimeout(timer);
+      window.clearTimeout(timeout);
       socket.close();
       const response = JSON.parse(event.data);
       if (response.status === "error" || response.error) {
@@ -119,1198 +82,801 @@ const xrplRequest = (request) =>
       resolve(response.result);
     });
     socket.addEventListener("error", () => {
-      window.clearTimeout(timer);
-      reject(new Error("Could not connect to XRPL mainnet."));
+      window.clearTimeout(timeout);
+      reject(new Error("Could not connect to the XRPL network."));
     });
   });
 
-const fetchTreasuryRlusdBalance = async () => {
+const createWalletFromInput = (method, value) => {
+  const phrase = value.trim();
+  if (!phrase) {
+    throw new Error("Enter your wallet phrase to continue.");
+  }
+
+  if (method === "family") {
+    return Wallet.fromSeed(phrase);
+  }
+
+  return Wallet.fromMnemonic(phrase);
+};
+
+const submitRlusdPayment = async ({ wallet, destination, amount }) => {
+  const client = new Client("wss://s1.ripple.com");
+  await client.connect();
+  try {
+    const transaction = {
+      TransactionType: "Payment",
+      Account: wallet.address,
+      Destination: destination,
+      SourceTag: SOURCE_TAG,
+      Amount: {
+        currency: RLUSD_CURRENCY,
+        issuer: RLUSD_ISSUER,
+        value: amount,
+      },
+    };
+    const prepared = await client.autofill(transaction);
+    const signed = wallet.sign(prepared);
+    const result = await client.submitAndWait(signed.tx_blob);
+    return { result, hash: signed.hash, transaction };
+  } finally {
+    await client.disconnect();
+  }
+};
+const readRlusdBalance = async (address) => {
+  if (!address || !address.startsWith("r")) {
+    return 0;
+  }
+
   const result = await xrplRequest({
     command: "account_lines",
-    account: DEFAULT_TREASURY_ADDRESS,
+    account: address,
     peer: RLUSD_ISSUER,
     ledger_index: "validated",
   });
   const line = result.lines?.find((item) =>
-    isRlusdCurrency(item.currency) && item.account === RLUSD_ISSUER
+    (item.currency === "RLUSD" || item.currency === RLUSD_CURRENCY) && item.account === RLUSD_ISSUER
   );
   return Math.max(0, Number(line?.balance || 0));
 };
 
-function genChart(bal) {
-  return Array.from({ length: 60 }, (_, i) => {
-    const secsAgo = (59 - i) * 60;
-    const b = Math.max(0, bal - PER_SEC * secsAgo);
-    const d = new Date(Date.now() - secsAgo * 1000);
-    return { t: d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), b };
-  });
-}
+const getSchedule = (person) => {
+  const payMode = person.payMode || "weekly";
+  const hourlyPay = Math.max(0, Number(person.hourlyPay) || 0);
+  const hoursPerWeek = Math.max(0, Number(person.hoursPerWeek) || 0);
+  const directWeeklyPay = Math.max(0, Number(person.weeklyPay ?? person.amount) || 0);
+  const weeklyPay = payMode === "hourly" ? hourlyPay * hoursPerWeek : directWeeklyPay;
+  const frequency = TIME_UNITS[person.frequency] || TIME_UNITS.minute;
+  const payments = Math.max(1, Math.floor(TIME_UNITS.week.seconds / frequency.seconds));
+  const perPayment = weeklyPay / payments;
 
-const INIT_TXS = [];
+  return {
+    total: weeklyPay,
+    payMode,
+    hourlyPay,
+    hoursPerWeek,
+    weeklyPay,
+    payments,
+    perPayment,
+    weeklyEquivalent: weeklyPay,
+    frequencyLabel: frequency.label,
+    frequencySeconds: frequency.seconds,
+  };
+};
 
-const WORKERS = [
-  { id: 1, name: "Treasury", role: "Payer", salary: 0, active: true },
-  { id: 2, name: "Worker", role: "Payee", salary: 0, active: true },
-];
+const getFrequencyMs = (person) => (TIME_UNITS[person.frequency] || TIME_UNITS.minute).seconds * 1000;
 
-const PROOFS = [];
+const addHistoryItem = (setter, item) => {
+  setter((current) => [
+    {
+      id: `history-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      at: new Date().toISOString(),
+      ...item,
+    },
+    ...current,
+  ]);
+};
 
-// ─── Primitives ───────────────────────────────────────────────────────────────
-function Dot({ color, pulse }) {
-  return (
-    <span style={{
-      display: "inline-block", width: 7, height: 7, borderRadius: "50%",
-      background: color, flexShrink: 0,
-      animation: pulse ? "spPulse 1.4s ease-in-out infinite" : "none",
-      boxShadow: pulse ? `0 0 6px ${color}` : "none",
-    }} />
-  );
-}
+const safeLogPayload = (value) => {
+  if (value instanceof Error) {
+    return { name: value.name, message: value.message, stack: value.stack };
+  }
+  if (Array.isArray(value)) {
+    return value.map(safeLogPayload);
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
 
-function Pill({ label, color, dim }) {
-  return (
-    <span style={{
-      display: "inline-flex", alignItems: "center", gap: 5,
-      padding: "3px 9px", borderRadius: 20,
-      background: dim || color + "11", border: `1px solid ${color}22`,
-      fontSize: 10, fontWeight: 600, letterSpacing: "0.07em",
-      textTransform: "uppercase", color,
-    }}>
-      <Dot color={color} pulse />
-      {label}
-    </span>
-  );
-}
-
-function Card({ children, style = {} }) {
-  return (
-    <div style={{
-      background: T.surf, border: `1px solid ${T.border}`,
-      borderRadius: 8, boxShadow: "0 12px 34px rgba(34,49,43,0.06)", ...style,
-    }}>
-      {children}
-    </div>
-  );
-}
-
-function SectionLabel({ children }) {
-  return (
-    <div style={{
-      fontSize: 10, fontWeight: 700, letterSpacing: "0.1em",
-      textTransform: "uppercase", color: T.muted, marginBottom: 12,
-    }}>
-      {children}
-    </div>
-  );
-}
-
-function MiniStat({ label, value, color }) {
-  return (
-    <div style={{ flex: 1, minWidth: 0 }}>
-      <div style={{ fontSize: 10, color: T.muted, marginBottom: 5, letterSpacing: "0.06em", textTransform: "uppercase" }}>{label}</div>
-      <div style={{ fontFamily: T.mono, fontSize: 16, fontWeight: 700, color: color || T.text }}>{value}</div>
-    </div>
-  );
-}
-
-function ChartTooltip({ active, payload, label }) {
-  if (!active || !payload?.length) return null;
-  return (
-    <div style={{
-      background: T.surf3, border: `1px solid ${T.border}`,
-      borderRadius: 8, padding: "8px 12px",
-    }}>
-      <div style={{ fontSize: 10, color: T.muted, marginBottom: 2 }}>{label}</div>
-      <div style={{ fontFamily: T.mono, fontSize: 13, color: T.green }}>{fmt(payload[0].value, 4)}</div>
-    </div>
-  );
-}
-
-// ─── Sidebar ──────────────────────────────────────────────────────────────────
-function Sidebar({ tab, setTab }) {
-  const nav = [
-    { id: "worker",   label: "Worker"        },
-    { id: "employer", label: "Treasury"      },
-    { id: "nullmark", label: "Proofs"        },
-  ];
-
-  const protocols = [
-    { label: "Crossmark",     sub: "Browser-native signing",    color: T.green  },
-    { label: "XRPL",          sub: "Fast payroll settlement",    color: T.blue   },
-    { label: "SecretVM",      sub: "Salary data sealed",        color: T.purple },
-    { label: "Proofs",        sub: "Portable income proofs",    color: T.amber  },
-  ];
-
-  return (
-    <div style={{
-      width: 200, flexShrink: 0, background: T.surf,
-      borderRight: `1px solid ${T.border}`,
-      display: "flex", flexDirection: "column",
-      padding: "20px 0", minHeight: "100%",
-    }}>
-      {/* Logo */}
-      <div style={{ padding: "0 18px 24px", borderBottom: `1px solid ${T.border}` }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{
-            width: 32, height: 32, background: T.text, borderRadius: 8,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            fontFamily: T.mono, fontSize: 12, fontWeight: 700, color: T.surf,
-          }}>CD</div>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: T.text, letterSpacing: 0 }}>Cadence</div>
-            <div style={{ fontSize: 10, color: T.muted }}>Payroll to trust</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Nav */}
-      <div style={{ padding: "16px 10px 20px", borderBottom: `1px solid ${T.border}` }}>
-        {nav.map(item => (
-          <button
-            key={item.id}
-            onClick={() => setTab(item.id)}
-            style={{
-              display: "block", width: "100%", textAlign: "left",
-              padding: "8px 10px", borderRadius: 8, border: "none", cursor: "pointer",
-              marginBottom: 2, fontSize: 13, fontWeight: tab === item.id ? 600 : 400,
-              background: tab === item.id ? T.greenDim : "transparent",
-              color: tab === item.id ? T.green : T.muted,
-              transition: "all 0.15s",
-            }}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Protocol status */}
-      <div style={{ padding: "16px 18px", flex: 1 }}>
-        <SectionLabel>Settlement stack</SectionLabel>
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {protocols.map(p => (
-            <div key={p.label} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-              <div style={{ paddingTop: 4 }}><Dot color={p.color} pulse /></div>
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 600, color: p.color }}>{p.label}</div>
-                <div style={{ fontSize: 10, color: T.muted, marginTop: 1 }}>{p.sub}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Footer */}
-      <div style={{ padding: "16px 18px", borderTop: `1px solid ${T.border}` }}>
-        <div style={{ fontSize: 10, color: T.muted, lineHeight: 1.5 }}>
-          Toledo Holdings<br />
-          <span style={{ color: T.muted, fontSize: 9 }}>Crossmark · XRPL · Proofs</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Worker view ──────────────────────────────────────────────────────────────
-function WorkerView({ balance, tick, onWithdraw }) {
-  const [chartData, setChartData] = useState(() => genChart(INIT_BAL));
-  const [txs] = useState(INIT_TXS);
-  const [withdrawn] = useState(0);
-  const [wCount] = useState(0);
-
-  useEffect(() => {
-    if (tick > 0 && tick % 60 === 0) {
-      const d = new Date();
-      setChartData(prev => [
-        ...prev.slice(1),
-        { t: d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), b: balance },
-      ]);
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+    const lower = key.toLowerCase();
+    if (lower.includes("seed") || lower.includes("phrase") || lower.includes("secret") || lower.includes("password") || lower.includes("accessinput")) {
+      return [key, "[redacted]"];
     }
-  }, [tick]);
+    return [key, safeLogPayload(item)];
+  }));
+};
 
-  const earnedToday = PER_SEC * (HOURS_IN * 3600 + tick);
-  const periodEarned = 0;
-  const pct = BIWEEKLY > 0 ? Math.min(100, (periodEarned / BIWEEKLY) * 100) : 0;
-  const nextTx = CADENCE - (tick % CADENCE);
-  const mm = String(Math.floor(nextTx / 60)).padStart(2, "0");
-  const ss = String(nextTx % 60).padStart(2, "0");
+const loadStoredLogs = () => {
+  try {
+    return JSON.parse(window.localStorage.getItem(LOG_STORAGE_KEY) || "[]");
+  } catch {
+    return [];
+  }
+};
 
+function Brand({ compact = false }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-
-      {/* Hero balance */}
-      <Card style={{ padding: "24px 28px", position: "relative", overflow: "hidden" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 14 }}>
-          <div>
-            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: T.muted, marginBottom: 10 }}>
-              Available earnings · RLUSD
-            </div>
-            <div style={{ fontFamily: T.mono, fontSize: 54, fontWeight: 700, color: T.green, lineHeight: 1, letterSpacing: 0, marginBottom: 10 }}>
-              {fmt(balance, 4)}
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-              <span style={{ fontFamily: T.mono, fontSize: 12, color: T.muted }}>
-                +{fmt(PER_MIN, 5)}<span style={{ color: T.muted + "77" }}>/min</span>
-              </span>
-              <span style={{ color: T.dim }}>·</span>
-              <span style={{ fontFamily: T.mono, fontSize: 12, color: T.muted }}>
-                +{fmt(PER_SEC, 7)}<span style={{ color: T.muted + "77" }}>/sec</span>
-              </span>
-            </div>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 }}>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-              <Pill label="Earning live" color={T.green} />
-              <Pill label="TEE sealed" color={T.purple} />
-            </div>
-            <button
-              onClick={onWithdraw}
-              style={{
-                background: T.text, color: T.surf, border: "none",
-                borderRadius: 8, padding: "11px 24px", fontWeight: 700,
-                fontSize: 13, cursor: "pointer", letterSpacing: "0.02em",
-                transition: "opacity 0.15s",
-              }}
-            >
-              Withdraw now
-            </button>
-          </div>
+    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <div className="brand-mark">C</div>
+      <div>
+        <div style={{ fontFamily: "Georgia, serif", fontSize: compact ? 22 : 28, fontWeight: 700, letterSpacing: "-0.04em" }}>
+          Cadence
         </div>
-
-        {/* Period progress */}
-        <div style={{ marginTop: 22 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: T.muted, marginBottom: 6 }}>
-            <span>Pay period progress</span>
-            <span style={{ color: T.green }}>{pct.toFixed(1)}% · {fmt(periodEarned)} of {fmt(BIWEEKLY)}</span>
-          </div>
-          <div style={{ height: 4, background: T.dim, borderRadius: 2, overflow: "hidden" }}>
-            <div style={{
-              height: "100%", width: `${pct}%`,
-              background: `linear-gradient(90deg, ${T.green}, ${T.blue})`,
-              borderRadius: 2, transition: "width 1.2s ease",
-            }} />
-          </div>
-        </div>
-      </Card>
-
-      {/* Stat row */}
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        {[
-          { label: "Earned today",  value: fmt(earnedToday),  color: T.green,  sub: `${(HOURS_IN + tick / 3600).toFixed(1)}h worked` },
-          { label: "This period",   value: fmt(periodEarned), color: T.blue,   sub: "14-day cycle" },
-          { label: "Rate / min",    value: fmt(PER_MIN, 5),   color: T.muted,  sub: "accrual rate" },
-          { label: "Withdrawn",     value: fmt(withdrawn),    color: T.text,   sub: `${wCount} pulls today` },
-        ].map(s => (
-          <div key={s.label} style={{
-            flex: 1, minWidth: 120,
-            background: T.surf, border: `1px solid ${T.border}`,
-            borderRadius: 8, padding: "14px 16px",
-          }}>
-            <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: T.muted, marginBottom: 8 }}>{s.label}</div>
-            <div style={{ fontFamily: T.mono, fontSize: 18, fontWeight: 700, color: s.color, marginBottom: 3 }}>{s.value}</div>
-            <div style={{ fontSize: 10, color: T.muted }}>{s.sub}</div>
-          </div>
-        ))}
+        {!compact && <div style={{ color: COLORS.muted, fontSize: 12, marginTop: 2 }}>small payments, right on time</div>}
       </div>
-
-      {/* Chart + TX feed */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 12 }}>
-        <Card style={{ padding: "18px 18px 12px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-            <SectionLabel>60-min stream chart</SectionLabel>
-            <div style={{ display: "flex", gap: 4 }}>
-              {["1H", "8H", "1D"].map((l, i) => (
-                <span key={l} style={{
-                  fontSize: 10, padding: "3px 7px", borderRadius: 5, cursor: "pointer",
-                  background: i === 0 ? T.greenDim : "transparent",
-                  color: i === 0 ? T.green : T.muted,
-                  border: i === 0 ? `1px solid ${T.border}` : "1px solid transparent",
-                }}>{l}</span>
-              ))}
-            </div>
-          </div>
-          <ResponsiveContainer width="100%" height={150}>
-            <AreaChart data={chartData} margin={{ top: 4, right: 2, bottom: 0, left: 0 }}>
-              <defs>
-                <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={T.green} stopOpacity={0.28} />
-                  <stop offset="100%" stopColor={T.green} stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <XAxis dataKey="t" tick={{ fontSize: 9, fill: T.muted }} tickLine={false} axisLine={false} interval={14} />
-              <YAxis tick={{ fontSize: 9, fill: T.muted }} tickLine={false} axisLine={false} tickFormatter={v => fmt(v, 0)} width={46} />
-              <Tooltip content={<ChartTooltip />} />
-              <Area type="monotone" dataKey="b" stroke={T.green} strokeWidth={1.8} fill="url(#bg)" dot={false} activeDot={{ r: 3, fill: T.green }} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </Card>
-
-        {/* TX feed */}
-        <Card style={{ padding: "18px", display: "flex", flexDirection: "column", gap: 8 }}>
-          <SectionLabel>Settlement receipts</SectionLabel>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1 }}>
-            {txs.length === 0 && (
-              <div style={{
-                padding: "18px 12px", borderRadius: 8, background: T.surf2,
-                color: T.muted, fontSize: 11, textAlign: "center",
-              }}>
-                No settlements yet
-              </div>
-            )}
-            {txs.slice(0, 5).map((tx, i) => (
-              <div key={i} style={{
-                display: "flex", justifyContent: "space-between", alignItems: "center",
-                padding: "7px 9px", borderRadius: 8,
-                background: tx.fresh ? T.greenMid : T.surf2,
-                border: `1px solid ${tx.fresh ? T.border : "transparent"}`,
-                transition: "background 0.4s ease, border 0.4s ease",
-              }}>
-                <div>
-                  <div style={{ fontFamily: T.mono, fontSize: 9, color: T.muted, marginBottom: 2 }}>{shortHash(tx.h)}</div>
-                  <div style={{ fontSize: 9, color: T.muted }}>{tx.label}</div>
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ fontFamily: T.mono, fontSize: 12, color: T.green, fontWeight: 700 }}>+{fmt(tx.amt, 4)}</div>
-                  <div style={{ fontSize: 9, color: T.green + "88" }}>settled</div>
-                </div>
-              </div>
-            ))}
-          </div>
-          {/* Countdown */}
-          <div style={{ padding: "8px 10px", borderRadius: 8, background: T.surf2, textAlign: "center", marginTop: 2 }}>
-            <span style={{ fontSize: 10, color: T.muted }}>Next settlement </span>
-            <span style={{ fontFamily: T.mono, fontSize: 10, color: T.green }}>{mm}:{ss}</span>
-          </div>
-        </Card>
-      </div>
-
-      {/* x402 spending */}
-      <Card style={{ padding: "18px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-          <SectionLabel>Pay rails</SectionLabel>
-          <Pill label="HTTP-native" color={T.blue} />
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
-          <div style={{
-            gridColumn: "1 / -1", background: T.surf2, borderRadius: 8,
-            padding: "12px 14px", color: T.muted, fontSize: 11, textAlign: "center",
-          }}>
-            No pay rails configured
-          </div>
-        </div>
-      </Card>
     </div>
   );
 }
 
-// ─── Employer view ────────────────────────────────────────────────────────────
-function EmployerView({ treasuryRlusdBalance, onRefreshBalance, balanceStatus }) {
-  const [workers, setWorkers] = useState(WORKERS);
-  const poolBalance = treasuryRlusdBalance ?? 0;
-  const dailyBurn = workers.filter(w => w.active).reduce((s, w) => s + w.salary / 365, 0);
-  const runway = dailyBurn > 0 ? poolBalance / dailyBurn : 0;
+function Button({ children, kind = "primary", ...props }) {
+  return <button className={`button button-${kind}`} {...props}>{children}</button>;
+}
 
-  const toggle = (id) => setWorkers(prev => prev.map(w => w.id === id ? { ...w, active: !w.active } : w));
+function Field({ label, children, help }) {
+  return (
+    <label className="field">
+      <span className="field-label">{label}</span>
+      {children}
+      {help && <span className="field-help">{help}</span>}
+    </label>
+  );
+}
 
-  const barData = workers.map(w => ({
-    name: w.name.split(" ")[0],
-    rate: parseFloat(((w.salary / (365 * 24 * 60)) * 5).toFixed(4)),
-    active: w.active,
-  }));
+function Intro({ onStart }) {
+  return (
+    <div className="center-screen intro-screen">
+      <div className="intro-decoration decoration-one" />
+      <div className="intro-decoration decoration-two" />
+      <div className="intro-card">
+        <Brand />
+        <div className="intro-sun">*</div>
+        <p className="eyebrow">A gentler way to pay</p>
+        <h1>Make every payment<br /><em>feel effortless.</em></h1>
+        <p className="intro-copy">
+          Cadence helps you set up simple RLUSD payment plans for the people you work with, one clear step at a time.
+        </p>
+        <Button onClick={onStart}>Set up your wallet <span>{">"}</span></Button>
+        <div className="intro-note">Local testing mode  your access input is never saved</div>
+      </div>
+    </div>
+  );
+}
+
+function WalletSetup({ method, setMethod, accessInput, setAccessInput, onSubmit, error }) {
+  const activeMethod = ACCESS_METHODS.find((item) => item.value === method);
+  return (
+    <div className="center-screen setup-screen">
+      <div className="setup-card">
+        <Brand compact />
+        <div className="progress-dots"><span className="active" /><span /><span /></div>
+        <p className="eyebrow">Step one of three</p>
+        <h2>Unlock your wallet<br />for Cadence.</h2>
+        <p className="section-copy">
+          Cadence uses this phrase locally to derive your XRPL wallet and sign RLUSD payments on this computer.
+        </p>
+        <div className="form-stack">
+          <Field label="Wallet phrase method">
+            <select value={method} onChange={(event) => setMethod(event.target.value)}>
+              {ACCESS_METHODS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+            </select>
+          </Field>
+          <Field label={activeMethod.label} help={`${activeMethod.hint}. Never send this phrase in logs or chat.`}>
+            <input
+              value={accessInput}
+              onChange={(event) => setAccessInput(event.target.value)}
+              type="password"
+              autoComplete="off"
+              placeholder={`Enter ${activeMethod.hint.toLowerCase()}`}
+            />
+          </Field>
+        </div>
+        {error && <div className="error-message">{error}</div>}
+        <Button onClick={onSubmit}>Unlock Cadence <span>{">"}</span></Button>
+        <div className="security-note"><span>*</span> Your phrase stays in memory for this session and is redacted from exported logs.</div>
+      </div>
+    </div>
+  );
+}
+
+function FundingModal({ onClose }) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <div className="modal-card">
+        <button className="modal-close" onClick={onClose} aria-label="Close">x</button>
+        <div className="modal-icon">o</div>
+        <p className="eyebrow">Your wallet is ready</p>
+        <h2>No RLUSD yet.</h2>
+        <p className="section-copy">Fund the wallet first, then Cadence can read the balance and help you plan payments.</p>
+        <div className="funding-steps">
+          <div><b>1</b><span>Use a trusted exchange or RLUSD onramp that supports the XRPL network.</span></div>
+          <div><b>2</b><span>Copy your public XRPL address and verify the RLUSD issuer before sending.</span></div>
+          <div><b>3</b><span>Come back and refresh the balance. Never share your secret phrase.</span></div>
+        </div>
+        <Button kind="secondary" onClick={onClose}>Go to dashboard</Button>
+      </div>
+    </div>
+  );
+}
+
+function PersonEditor({ person, onSave, onCancel }) {
+  const [draft, setDraft] = useState({ ...emptyPerson, ...(person || {}) });
+  const update = (key, value) => setDraft((current) => ({ ...current, [key]: value }));
+  const hourlyMode = (draft.payMode || "weekly") === "hourly";
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-
-      {/* Pool hero */}
-      <Card style={{ padding: "24px 28px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
-          <div>
-            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: T.muted, marginBottom: 10 }}>
-              Payroll pool balance · RLUSD
-            </div>
-            <div style={{ fontFamily: T.mono, fontSize: 52, fontWeight: 700, color: T.text, lineHeight: 1, marginBottom: 8 }}>
-              {fmt(poolBalance)}
-            </div>
-            <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-              <span style={{ fontFamily: T.mono, fontSize: 12, color: T.amber }}>
-                −{fmt(dailyBurn, 2)}<span style={{ color: T.muted + "77" }}>/day</span>
-              </span>
-              <span style={{ color: T.dim }}>·</span>
-              <span style={{ fontFamily: T.mono, fontSize: 12, color: runway < 7 ? T.amber : T.green }}>
-                {runway.toFixed(1)}d runway
-              </span>
-            </div>
-          </div>
-          <button onClick={onRefreshBalance} style={{
-            background: T.text, color: T.surf, border: "none", borderRadius: 8,
-            padding: "11px 24px", fontWeight: 700, fontSize: 13, cursor: "pointer",
-          }}>
-            Read wallet balance
-          </button>
+    <form className="editor-card" onSubmit={(event) => { event.preventDefault(); onSave(draft); }}>
+      <div className="editor-heading">
+        <div><p className="eyebrow">People</p><h3>{person?.id ? "Edit person" : "Add a person"}</h3></div>
+        <button type="button" className="text-button" onClick={onCancel}>Cancel</button>
+      </div>
+      <div className="editor-grid">
+        <Field label="Name"><input required value={draft.name} onChange={(event) => update("name", event.target.value)} placeholder="Alex Morgan" /></Field>
+        <Field label="Role"><input value={draft.role} onChange={(event) => update("role", event.target.value)} placeholder="Designer" /></Field>
+        <Field label="Email"><input type="email" value={draft.email} onChange={(event) => update("email", event.target.value)} placeholder="alex@example.com" /></Field>
+        <Field label="Public XRPL address" help="Required only for a real payment."><input value={draft.address} onChange={(event) => update("address", event.target.value)} placeholder="r..." /></Field>
+      </div>
+      <div className="pay-plan-box">
+        <div className="pay-plan-title">Weekly payment cadence</div>
+        <label className="mode-toggle">
+          <input type="checkbox" checked={hourlyMode} onChange={(event) => update("payMode", event.target.checked ? "hourly" : "weekly")} />
+          <span>{hourlyMode ? "Hourly pay" : "Weekly salary"}</span>
+        </label>
+        <div className="editor-grid plan-grid">
+          {hourlyMode ? (
+            <>
+              <Field label="Hourly RLUSD pay" help="Rate per hour."><div className="input-with-symbol"><span>$</span><input type="number" min="0" step="0.01" required value={draft.hourlyPay ?? "20"} onChange={(event) => update("hourlyPay", event.target.value)} /></div></Field>
+              <Field label="Hours per week" help="Used to calculate weekly total."><input type="number" min="0" step="0.25" required value={draft.hoursPerWeek ?? "40"} onChange={(event) => update("hoursPerWeek", event.target.value)} /></Field>
+            </>
+          ) : (
+            <Field label="Weekly RLUSD pay" help="The total this person should receive each week."><div className="input-with-symbol"><span>$</span><input type="number" min="0" step="0.01" required value={draft.weeklyPay ?? draft.amount ?? "16"} onChange={(event) => update("weeklyPay", event.target.value)} /></div></Field>
+          )}
+          <Field label="Pay frequency" help="Cadence divides the weekly total across this interval."><select value={draft.frequency} onChange={(event) => update("frequency", event.target.value)}>{FREQUENCIES.map((key) => <option key={key} value={key}>Every {TIME_UNITS[key].label}</option>)}</select></Field>
         </div>
-      </Card>
+        <ScheduleSummary person={draft} />
+      </div>
+      <Button type="submit">Save cadence <span>{">"}</span></Button>
+    </form>
+  );
+}
 
-      {balanceStatus && (
-        <div style={{
-          padding: "10px 12px", borderRadius: 8, background: T.surf2,
-          border: `1px solid ${T.border}`, color: T.muted, fontSize: 12,
-        }}>
-          {balanceStatus}
+function ScheduleSummary({ person }) {
+  const schedule = getSchedule(person);
+  return (
+    <div className="schedule-summary">
+      <div><span className="summary-label">Each payment</span><strong>{money(schedule.perPayment, 6)}</strong></div>
+      <div><span className="summary-label">Payments per week</span><strong>{schedule.payments.toLocaleString()}</strong></div>
+      <div><span className="summary-label">Weekly total</span><strong>{money(schedule.weeklyPay, 2)}</strong></div>
+    </div>
+  );
+}
+
+function PeopleList({ people, selectedId, onSelect, onAdd }) {
+  return (
+    <div className="people-card">
+      <div className="card-heading"><div><p className="eyebrow">Your people</p><h2>{people.length ? "Payment plans" : "Start with one person"}</h2></div><Button kind="small" onClick={onAdd}>+ Add person</Button></div>
+      {people.length === 0 ? (
+        <div className="empty-people"><div className="empty-scribble">*</div><p>Add someone to see their payment plan here.</p><Button kind="secondary" onClick={onAdd}>Add your first person</Button></div>
+      ) : (
+        <div className="people-list">
+          {people.map((person) => {
+            const schedule = getSchedule(person);
+            return <button key={person.id} className={`person-row ${selectedId === person.id ? "selected" : ""}`} onClick={() => onSelect(person.id)}>
+              <span className="avatar">{person.name.slice(0, 1).toUpperCase()}</span>
+              <span className="person-info"><b>{person.name}</b><small>{person.role || "Person"}</small></span>
+              <span className="person-amount"><b>{money(schedule.perPayment, 4)}</b><small>every {schedule.frequencyLabel}</small></span>
+              <span className={`status-dot ${person.active ? "on" : ""}`} />
+            </button>;
+          })}
         </div>
       )}
-
-      {/* Stats */}
-      <div style={{ display: "flex", gap: 12 }}>
-        {[
-          { label: "Active workers",     value: workers.filter(w => w.active).length + ` of ${workers.length}`, color: T.green },
-          { label: "Daily burn",         value: fmt(dailyBurn),                                                  color: T.amber },
-          { label: "Settled this period",value: fmt(dailyBurn * 7),                                              color: T.blue  },
-          { label: "Avg salary",         value: fmt(workers.length ? workers.reduce((s,w) => s+w.salary,0)/workers.length : 0, 0), color: T.text  },
-        ].map(s => (
-          <div key={s.label} style={{
-            flex: 1, minWidth: 100, background: T.surf, border: `1px solid ${T.border}`,
-            borderRadius: 8, padding: "14px 16px",
-          }}>
-            <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: T.muted, marginBottom: 8 }}>{s.label}</div>
-            <div style={{ fontFamily: T.mono, fontSize: 16, fontWeight: 700, color: s.color }}>{s.value}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Workforce table + chart */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 260px", gap: 12 }}>
-        <Card style={{ padding: "18px", overflow: "hidden" }}>
-          <SectionLabel>Active workforce</SectionLabel>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {workers.map(w => (
-              <div key={w.id} style={{
-                display: "flex", alignItems: "center", gap: 12,
-                padding: "10px 12px", borderRadius: 8, background: T.surf2,
-                border: `1px solid ${w.active ? T.border : "transparent"}`,
-                opacity: w.active ? 1 : 0.5,
-              }}>
-                <div style={{
-                  width: 32, height: 32, borderRadius: 8, flexShrink: 0,
-                  background: w.active ? T.greenDim : T.dim,
-                  border: `1px solid ${w.active ? T.border : "transparent"}`,
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  fontFamily: T.mono, fontSize: 11, fontWeight: 700,
-                  color: w.active ? T.green : T.muted,
-                }}>
-                  {w.name.split(" ").map(n => n[0]).join("")}
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{w.name}</div>
-                  <div style={{ fontSize: 10, color: T.muted }}>{w.role}</div>
-                </div>
-                <div style={{ textAlign: "right", marginRight: 8 }}>
-                  <div style={{ fontFamily: T.mono, fontSize: 12, color: T.text }}>{fmt(w.salary, 0)}/yr</div>
-                  <div style={{ fontFamily: T.mono, fontSize: 10, color: T.green }}>
-                    +{fmt((w.salary / (365 * 24 * 3600)) * 60, 5)}/min
-                  </div>
-                </div>
-                <button
-                  onClick={() => toggle(w.id)}
-                  style={{
-                    padding: "5px 12px", borderRadius: 6, fontSize: 11,
-                    fontWeight: 600, cursor: "pointer", border: "none",
-                    background: w.active ? T.greenDim : T.dim,
-                    color: w.active ? T.green : T.muted,
-                  }}
-                >
-                  {w.active ? "Streaming" : "Paused"}
-                </button>
-              </div>
-            ))}
-          </div>
-        </Card>
-
-        <Card style={{ padding: "18px" }}>
-          <SectionLabel>Burn rate / 5 min</SectionLabel>
-          <ResponsiveContainer width="100%" height={180}>
-            <BarChart data={barData} margin={{ top: 4, right: 4, bottom: 0, left: -10 }}>
-              <XAxis dataKey="name" tick={{ fontSize: 10, fill: T.muted }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fontSize: 9, fill: T.muted }} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} />
-              <Tooltip
-                formatter={(v) => [`$${v}`, "RLUSD / 5 min"]}
-                contentStyle={{ background: T.surf3, border: `1px solid ${T.border}`, borderRadius: 8, fontSize: 11 }}
-                labelStyle={{ color: T.muted }}
-                itemStyle={{ color: T.green }}
-              />
-              <Bar dataKey="rate" radius={[4, 4, 0, 0]}>
-                {barData.map((d, i) => (
-                  <Cell key={i} fill={d.active ? T.green : T.dim} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-          <div style={{ marginTop: 10, padding: "8px 10px", borderRadius: 8, background: T.surf2 }}>
-            <div style={{ fontSize: 10, color: T.muted, marginBottom: 3 }}>SecretVM status</div>
-            <Pill label="Salary data sealed" color={T.purple} />
-          </div>
-        </Card>
-      </div>
     </div>
   );
 }
 
-// ─── Proofs view ──────────────────────────────────────────────────────────────
-function ProofsView() {
+function PersonDetails({ person, onEdit, onToggle, onPay, walletReady, paymentMessage }) {
+  const schedule = getSchedule(person);
+  const paidCount = Number(person.paidCount || 0);
+  const nextRun = person.nextRunAt ? new Date(person.nextRunAt).toLocaleString() : "Not scheduled";
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-
-      {/* Credit status hero */}
-      <Card style={{ padding: "24px 28px", borderColor: "rgba(139,125,216,0.2)" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 16 }}>
-          <div>
-            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: T.muted, marginBottom: 10 }}>
-              Cadence Proofs
-            </div>
-            <div style={{ fontSize: 36, fontWeight: 700, color: T.text, lineHeight: 1, marginBottom: 8 }}>
-              On-chain income profile
-            </div>
-            <div style={{ fontSize: 13, color: T.muted, maxWidth: 480, lineHeight: 1.6 }}>
-              Verified ZK income proofs — posted to zkVerify without revealing salary figures. Lenders confirm your income threshold without you disclosing a number.
-            </div>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "flex-end" }}>
-            <Pill label="0 proofs verified" color={T.green} />
-            <Pill label="0 pending" color={T.amber} />
-          </div>
-        </div>
-      </Card>
-
-      {/* Impact + proof list */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-
-        <Card style={{ padding: "18px" }}>
-          <SectionLabel>ZK proof history</SectionLabel>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {PROOFS.length === 0 && (
-              <div style={{
-                padding: "18px 12px", borderRadius: 8, background: T.surf2,
-                color: T.muted, fontSize: 11, textAlign: "center",
-              }}>
-                No proofs posted yet
-              </div>
-            )}
-            {PROOFS.map((p, i) => (
-              <div key={i} style={{
-                padding: "10px 12px", borderRadius: 8, background: T.surf2,
-                border: `1px solid ${p.ok ? T.border : "transparent"}`,
-                display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12,
-              }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: p.ok ? T.text : T.muted, marginBottom: 3 }}>{p.level}</div>
-                  <div style={{ fontFamily: T.mono, fontSize: 9, color: T.muted }}>
-                    {p.hash ? shortHash(p.hash) : "—"}
-                  </div>
-                </div>
-                <div style={{ textAlign: "right", flexShrink: 0 }}>
-                  <div style={{ fontSize: 10, color: p.ok ? T.green : T.amber, fontWeight: 600 }}>
-                    {p.ok ? "verified" : "pending"}
-                  </div>
-                  <div style={{ fontSize: 9, color: T.muted }}>{p.date}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </Card>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {/* Credit impact */}
-          <Card style={{ padding: "18px", flex: 1 }}>
-            <SectionLabel>Credit impact</SectionLabel>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {[
-                { label: "Loan approval likelihood", delta: "0%", color: T.muted },
-                { label: "Rental application strength", delta: "0%", color: T.muted },
-                { label: "Income verification time", delta: "0%", color: T.muted },
-              ].map(item => (
-                <div key={item.label} style={{
-                  display: "flex", justifyContent: "space-between", alignItems: "center",
-                  padding: "8px 12px", borderRadius: 8, background: T.surf2,
-                }}>
-                  <div style={{ fontSize: 12, color: T.muted }}>{item.label}</div>
-                  <div style={{ fontFamily: T.mono, fontSize: 14, fontWeight: 700, color: item.color }}>{item.delta}</div>
-                </div>
-              ))}
-            </div>
-          </Card>
-
-          {/* How it works */}
-          <Card style={{ padding: "18px" }}>
-            <SectionLabel>How it works</SectionLabel>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {[
-                { step: "1", text: "XRPL settlement history accumulates on-chain" },
-                { step: "2", text: "SecretVM computes income threshold inside TEE" },
-                { step: "3", text: "ZK proof posted to zkVerify — no salary disclosed" },
-                { step: "4", text: "Lender verifies proof without seeing your number" },
-              ].map(item => (
-                <div key={item.step} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-                  <div style={{
-                    width: 18, height: 18, borderRadius: "50%", background: T.purpleDim,
-                    border: `1px solid ${T.purple}33`, display: "flex", alignItems: "center",
-                    justifyContent: "center", fontSize: 9, fontWeight: 700, color: T.purple, flexShrink: 0, marginTop: 1,
-                  }}>{item.step}</div>
-                  <div style={{ fontSize: 11, color: T.muted, lineHeight: 1.5 }}>{item.text}</div>
-                </div>
-              ))}
-            </div>
-          </Card>
-        </div>
-      </div>
-
-      {/* Attestation panel */}
-      <Card style={{ padding: "18px", borderColor: "rgba(139,125,216,0.2)" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
-          <div>
-            <SectionLabel>Latest attestation · zkVerify</SectionLabel>
-            <div style={{ fontFamily: T.mono, fontSize: 12, color: T.muted }}>No attestation yet</div>
-            <div style={{ fontSize: 11, color: T.muted, marginTop: 4 }}>Submit a mainnet settlement before posting proof data.</div>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <Pill label="TEE pending" color={T.purple} />
-            <Pill label="On-chain pending" color={T.green} />
-          </div>
-        </div>
-      </Card>
+    <div className="details-card">
+      <div className="details-top"><div className="large-avatar">{person.name.slice(0, 1).toUpperCase()}</div><div><p className="eyebrow">Selected person</p><h2>{person.name}</h2><p className="muted-line">{person.role || "No role added"} {person.email ? ` ${person.email}` : ""}</p></div><button className="text-button edit-button" onClick={onEdit}>Edit</button></div>
+      <div className="address-line"><span>Destination</span><code>{shortAddress(person.address)}</code></div>
+      <div className="detail-highlight"><div><span className="eyebrow">Weekly pay</span><strong>{money(schedule.weeklyPay)}</strong><small>distributed across 1 week</small></div><div className="highlight-arrow">?</div><div><span className="eyebrow">Each payout</span><strong>{money(schedule.perPayment, 6)}</strong><small>every {schedule.frequencyLabel}</small></div></div>
+      <div className="plan-meter"><div><span>Paid prompts</span><strong>{paidCount} / {schedule.payments.toLocaleString()}</strong></div><div><span>Next prompt</span><strong>{nextRun}</strong></div><div><span>Source tag</span><strong>{SOURCE_TAG}</strong></div></div>
+      <div className="details-actions"><Button kind={person.active ? "secondary" : "primary"} onClick={onToggle}>{person.active ? "Pause plan" : "Start plan"}</Button><Button kind="secondary" onClick={onPay} disabled={!walletReady || !person.address.startsWith("r")}>Pay one installment</Button></div>
+      {!walletReady && <p className="inline-note">Unlock your wallet phrase first to make an on-chain payment.</p>}
+      {walletReady && !person.address.startsWith("r") && <p className="inline-note">Add a public XRPL destination address before paying.</p>}
+      {paymentMessage && <div className="success-message">{paymentMessage}</div>}
+      <div className="safe-payment-note"><span>?</span> Cadence divides the weekly pay by the selected frequency. Your wallet may still ask you to confirm each on-chain payment.</div>
     </div>
   );
 }
 
-// ─── Withdraw panel ───────────────────────────────────────────────────────────
-function WithdrawPanel({ balance, onClose, onConfirm }) {
+function Dashboard({ walletAddress, rlusdBalance, balanceLoading, onRefreshBalance, onOpenFunding, onReset, people, onAdd, selectedId, onSelect, onSave, onEdit, onToggle, onPay, paymentMessage, history, debugLogs, onExportLogs, onClearLogs }) {
+  const selectedPerson = people.find((person) => person.id === selectedId);
   return (
-    <div style={{
-      background: T.surf2, border: `1px solid ${T.borderB}`,
-      borderRadius: 8, padding: "20px 24px", marginBottom: 14,
-    }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 4 }}>Withdraw RLUSD</div>
-          <div style={{ fontSize: 12, color: T.muted }}>
-            Instant transfer · RLUSD → USD via exchange offramp
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <div style={{ textAlign: "right" }}>
-            <div style={{ fontSize: 10, color: T.muted, marginBottom: 3 }}>Available</div>
-            <div style={{ fontFamily: T.mono, fontSize: 22, fontWeight: 700, color: T.green }}>{fmt(balance, 4)}</div>
-          </div>
-          <button onClick={onConfirm} style={{
-            background: T.text, color: T.surf, border: "none",
-            borderRadius: 8, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer",
-          }}>Confirm</button>
-          <button onClick={onClose} style={{
-            background: T.surf, color: T.muted, border: `1px solid ${T.border}`,
-            borderRadius: 8, padding: "10px 14px", fontSize: 13, cursor: "pointer",
-          }}>✕</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Root ─────────────────────────────────────────────────────────────────────
-function SettlementPanel({
-  balance,
-  onClose,
-  onConfirm,
-  workerAddress,
-  setWorkerAddress,
-  rlusdAmount,
-  setRlusdAmount,
-  settlementStatus,
-  wallet,
-  treasuryRlusdBalance,
-  onRefreshBalance,
-  onStartStream,
-  onStopStream,
-  isStreaming,
-}) {
-  const busy = settlementStatus.state === "submitting";
-  const txHash = getTxHash(wallet.lastTx);
-  const visibleBalance = treasuryRlusdBalance == null ? "..." : fmt(treasuryRlusdBalance, 6);
-
-  return (
-    <div style={{
-      background: T.surf2, border: `1px solid ${T.borderB}`,
-      borderRadius: 8, padding: "20px 24px", marginBottom: 14,
-    }}>
-      <form onSubmit={onConfirm} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 4 }}>Settle RLUSD</div>
-            <div style={{ fontSize: 12, color: T.muted }}>
-              Crossmark signs an XRPL mainnet payment from treasury to worker.
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <div style={{ textAlign: "right" }}>
-              <div style={{ fontSize: 10, color: T.muted, marginBottom: 3 }}>Treasury RLUSD</div>
-              <div style={{ fontFamily: T.mono, fontSize: 22, fontWeight: 700, color: T.green }}>{visibleBalance}</div>
-            </div>
-            <button type="submit" disabled={busy} style={{
-              background: T.text, color: T.surf, border: "none",
-              borderRadius: 8, padding: "10px 20px", fontSize: 13,
-              fontWeight: 700, cursor: busy ? "wait" : "pointer", opacity: busy ? 0.7 : 1,
-            }}>
-              {busy ? "Submitting" : "Send once"}
-            </button>
-            <button type="button" onClick={onClose} style={{
-              background: T.surf, color: T.muted, border: `1px solid ${T.border}`,
-              borderRadius: 8, padding: "10px 14px", fontSize: 13, cursor: "pointer",
-            }}>Close</button>
-          </div>
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(220px, 1fr) 160px", gap: 10 }}>
-          <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: T.muted }}>
-              Worker address
-            </span>
-            <input
-              value={workerAddress}
-              onChange={(event) => setWorkerAddress(event.target.value.trim())}
-              placeholder="r..."
-              style={{
-                width: "100%", border: `1px solid ${T.border}`, background: T.surf,
-                color: T.text, borderRadius: 8, padding: "10px 12px",
-                fontFamily: T.mono, fontSize: 12, outline: "none",
-              }}
-            />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: T.muted }}>
-              RLUSD
-            </span>
-            <input
-              value={rlusdAmount}
-              onChange={(event) => setRlusdAmount(event.target.value)}
-              inputMode="decimal"
-              style={{
-                width: "100%", border: `1px solid ${T.border}`, background: T.surf,
-                color: T.text, borderRadius: 8, padding: "10px 12px",
-                fontFamily: T.mono, fontSize: 12, outline: "none",
-              }}
-            />
-          </label>
-        </div>
-
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <Pill label={`SourceTag ${CADENCE_SOURCE_TAG}`} color={T.blue} />
-          <Pill label="RLUSD" color={T.green} />
-          <Pill label="15 sec stream" color={isStreaming ? T.green : T.muted} />
-          <span style={{ fontFamily: T.mono, fontSize: 10, color: T.muted }}>
-            Treasury {shortAddress(DEFAULT_TREASURY_ADDRESS)}
-          </span>
-        </div>
-
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-          <button type="button" onClick={onRefreshBalance} disabled={busy} style={{
-            background: T.surf, color: T.text, border: `1px solid ${T.border}`,
-            borderRadius: 8, padding: "9px 14px", fontSize: 12, fontWeight: 700,
-            cursor: busy ? "wait" : "pointer",
-          }}>
-            Refresh balance
-          </button>
-          <button type="button" onClick={onStartStream} disabled={busy || isStreaming} style={{
-            background: isStreaming ? T.dim : T.green, color: isStreaming ? T.muted : T.bg,
-            border: "none", borderRadius: 8, padding: "9px 14px", fontSize: 12,
-            fontWeight: 700, cursor: busy || isStreaming ? "wait" : "pointer",
-          }}>
-            Start 15s stream
-          </button>
-          <button type="button" onClick={onStopStream} disabled={!isStreaming} style={{
-            background: T.surf, color: isStreaming ? T.amber : T.muted,
-            border: `1px solid ${T.border}`, borderRadius: 8, padding: "9px 14px",
-            fontSize: 12, fontWeight: 700, cursor: isStreaming ? "pointer" : "default",
-          }}>
-            Stop
-          </button>
-          <span style={{ fontSize: 11, color: T.muted }}>
-            Sends up to the RLUSD amount above every 15 seconds until the treasury balance is empty.
-          </span>
-        </div>
-
-        {(settlementStatus.message || wallet.error || txHash) && (
-          <div style={{
-            padding: "10px 12px", borderRadius: 8, background: T.surf,
-            border: `1px solid ${settlementStatus.state === "error" || wallet.error ? T.amberDim : T.border}`,
-            color: settlementStatus.state === "error" || wallet.error ? T.amber : T.muted,
-            fontSize: 12,
-          }}>
-            {settlementStatus.message || wallet.error}
-            {txHash && (
-              <a
-                href={`https://xrpscan.com/tx/${txHash}`}
-                target="_blank"
-                rel="noreferrer"
-                style={{ color: T.green, marginLeft: 8, fontFamily: T.mono }}
-              >
-                {shortHash(txHash)}
-              </a>
-            )}
-          </div>
-        )}
-      </form>
-    </div>
-  );
-}
-
-function WalletStatus({ wallet, onConnect }) {
-  const connected = Boolean(wallet.address);
-  const busy = wallet.status === "connecting";
-
-  return (
-    <div style={{
-      display: "flex", alignItems: "center", gap: 10,
-      padding: "6px 8px 6px 10px", border: `1px solid ${connected ? T.greenMid : T.border}`,
-      borderRadius: 8, background: connected ? T.greenDim : T.surf2,
-      minHeight: 34,
-    }}>
-      <Dot color={connected ? T.green : T.amber} pulse={connected || busy} />
-      <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 10, color: T.muted, lineHeight: 1 }}>Crossmark</div>
-        <div style={{
-          fontFamily: T.mono, fontSize: 11, color: connected ? T.green : T.text,
-          maxWidth: 132, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-        }}>
-          {connected ? shortAddress(wallet.address) : wallet.status}
-        </div>
-      </div>
-      <button
-        onClick={onConnect}
-        disabled={busy}
-        style={{
-          border: "none", borderRadius: 7, padding: "6px 10px",
-          background: connected ? T.surf3 : T.green, color: connected ? T.text : T.bg,
-          fontSize: 11, fontWeight: 700, cursor: busy ? "wait" : "pointer",
-        }}
-      >
-        {busy ? "Connecting" : connected ? "Switch" : "Connect"}
-      </button>
+    <div className="app-shell">
+      <header className="topbar"><Brand compact /><div className="topbar-right"><div className="wallet-chip"><span className="online-dot" />{shortAddress(walletAddress)}</div><Button kind="ghost" onClick={onExportLogs}>Export logs</Button><Button kind="ghost" onClick={onClearLogs}>Clear logs</Button><Button kind="ghost" onClick={onReset}>Change wallet</Button></div></header>
+      <main className="dashboard-content">
+        <div className="welcome-row"><div><p className="eyebrow">Good to see you</p><h1>Your payment rhythm</h1><p className="muted-line">Keep RLUSD moving at a pace that feels natural.</p></div><div className="live-pill"><span className="online-dot" />Local session</div></div>
+        <section className="balance-card"><div><p className="eyebrow">Available balance  RLUSD</p><div className="balance-number">{money(rlusdBalance, 2)}</div><p className="muted-line">{walletAddress ? shortAddress(walletAddress) : "Local wallet test mode"}</p></div><div className="balance-actions"><Button kind="secondary" onClick={onRefreshBalance} disabled={balanceLoading}>{balanceLoading ? "Reading..." : "Refresh balance"}</Button>{rlusdBalance <= 0 && <Button kind="soft" onClick={onOpenFunding}>How to get RLUSD</Button>}</div></section>
+        <section className="payer-strip"><div><p className="eyebrow">Payment wallet</p><strong>{shortAddress(walletAddress)}</strong><span>Payments are signed locally from the wallet phrase you unlocked.</span></div><Button kind="secondary" onClick={onReset}>Change wallet</Button></section>
+        <div className="content-grid"><PeopleList people={people} selectedId={selectedId} onSelect={onSelect} onAdd={onAdd} />{selectedPerson ? <PersonDetails person={selectedPerson} onEdit={() => onEdit(selectedPerson)} onToggle={() => onToggle(selectedPerson.id)} onPay={() => onPay(selectedPerson)} walletReady={Boolean(walletAddress && walletAddress.startsWith("r"))} paymentMessage={paymentMessage} /> : <div className="details-card details-empty"><div className="empty-sun">*</div><h2>Your next step is small.</h2><p>Add a person and Cadence will turn their total pay into clear, simple installments.</p><Button onClick={onAdd}>Create a payment plan</Button></div>}</div>
+        <section className="history-panel"><div className="card-heading"><div><p className="eyebrow">Diagnostics</p><h2>Debug logs</h2></div><Button kind="small" onClick={onExportLogs}>Export logs</Button></div>{debugLogs.length === 0 ? <p className="muted-line">No diagnostic logs yet.</p> : <div className="debug-log-list">{debugLogs.slice(0, 12).map((item) => <div className="debug-log-row" key={item.id}><time>{new Date(item.at).toLocaleString()}</time><b>{item.event}</b><code>{JSON.stringify(item.payload)}</code></div>)}</div>}</section>
+        <p className="footer-note">RLUSD is a dollar-denominated token on the XRP Ledger. Network fees, issuer details, and wallet confirmations should always be checked before sending.</p>
+      </main>
     </div>
   );
 }
 
 export default function CadenceDashboard() {
-  const [tick, setTick]             = useState(0);
-  const [balance, setBalance]       = useState(INIT_BAL);
-  const [tab, setTab]               = useState("worker");
-  const [showWithdraw, setShow]     = useState(false);
-  const [workerAddress, setWorkerAddress] = useState(DEFAULT_WORKER_ADDRESS);
-  const [rlusdAmount, setRlusdAmount] = useState(DEFAULT_RLUSD_WITHDRAW_AMOUNT);
-  const [settlementStatus, setSettlementStatus] = useState({ state: "idle", message: "" });
-  const [treasuryRlusdBalance, setTreasuryRlusdBalance] = useState(null);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const streamTimerRef = useRef(null);
-  const streamActiveRef = useRef(false);
-  const [wallet, setWallet]         = useState({
-    status: "not connected",
-    address: "",
-    error: "",
-    lastTx: null,
-  });
+  const [screen, setScreen] = useState("intro");
+  const [method, setMethod] = useState("family");
+  const [accessInput, setAccessInput] = useState("");
+  const [walletAddress, setWalletAddress] = useState("");
+  const [rlusdBalance, setRlusdBalance] = useState(0);
+  const [balanceLoading, setBalanceLoading] = useState(false);
+  const [setupError, setSetupError] = useState("");
+  const [showFunding, setShowFunding] = useState(false);
+  const [signingWallet, setSigningWallet] = useState(null);
+  const [people, setPeople] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editingPerson, setEditingPerson] = useState(null);
+  const [paymentMessage, setPaymentMessage] = useState("");
+  const [history, setHistory] = useState([]);
+  const [debugLogs, setDebugLogs] = useState(loadStoredLogs);
+  const autoPayingRef = useRef(false);
+
+  const selectedPerson = useMemo(() => people.find((person) => person.id === selectedId), [people, selectedId]);
+
+  const logEvent = (event, payload = {}) => {
+    const entry = {
+      id: `log-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      at: new Date().toISOString(),
+      event,
+      payload: safeLogPayload(payload),
+    };
+    setDebugLogs((current) => {
+      const next = [entry, ...current].slice(0, MAX_LOGS);
+      window.localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+    console.info(`[Cadence] ${event}`, entry.payload);
+    return entry;
+  };
+
+  const exportLogs = () => {
+    const logText = JSON.stringify({
+      exportedAt: new Date().toISOString(),
+      app: "Cadence",
+      sourceTag: SOURCE_TAG,
+      logs: debugLogs,
+      people: people.map((person) => ({
+        id: person.id,
+        name: person.name,
+        address: person.address ? shortAddress(person.address) : "",
+        active: person.active,
+        schedule: getSchedule(person),
+        paidCount: person.paidCount || 0,
+        nextRunAt: person.nextRunAt || null,
+      })),
+    }, null, 2);
+    const blob = new Blob([logText], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `cadence-logs-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    logEvent("logs.exported", { count: debugLogs.length });
+  };
+
+  const clearLogs = () => {
+    window.localStorage.removeItem(LOG_STORAGE_KEY);
+    setDebugLogs([]);
+    console.info("[Cadence] logs.cleared");
+  };
+
+  const refreshBalance = async (address = walletAddress) => {
+    logEvent("balance.refresh.started", { address: address ? shortAddress(address) : "none" });
+    if (!address || !address.startsWith("r")) {
+      setRlusdBalance(0);
+      setShowFunding(true);
+      logEvent("balance.refresh.skipped", { reason: "missing_or_invalid_public_address" });
+      return;
+    }
+    setBalanceLoading(true);
+    try {
+      const balance = await readRlusdBalance(address);
+      setRlusdBalance(balance);
+      if (balance <= 0) setShowFunding(true);
+      logEvent("balance.refresh.success", { address: shortAddress(address), balance });
+    } catch (error) {
+      setSetupError(error?.message || "Could not read the RLUSD balance.");
+      logEvent("balance.refresh.failed", { error });
+    } finally {
+      setBalanceLoading(false);
+    }
+  };
+
+  const finishSetup = async () => {
+    logEvent("wallet.setup.submitted", {
+      method,
+      accessLength: accessInput.trim().length,
+    });
+
+    try {
+      const wallet = createWalletFromInput(method, accessInput);
+      setSetupError("");
+      setSigningWallet(wallet);
+      setWalletAddress(wallet.address);
+      setScreen("dashboard");
+      logEvent("wallet.setup.success", { method, walletAddress: shortAddress(wallet.address) });
+      await refreshBalance(wallet.address);
+    } catch (error) {
+      setSigningWallet(null);
+      setSetupError(error?.message || "Could not unlock this XRPL wallet phrase.");
+      logEvent("wallet.setup.failed", { method, error });
+    }
+  };
+
+  const savePerson = (draft) => {
+    const next = { ...draft, payMode: draft.payMode || "weekly", weeklyPay: draft.weeklyPay ?? draft.amount ?? "16", hourlyPay: draft.hourlyPay ?? "20", hoursPerWeek: draft.hoursPerWeek ?? "40", id: draft.id || `person-${Date.now()}`, paidCount: draft.paidCount || 0, nextRunAt: draft.nextRunAt || null };
+    const schedule = getSchedule(next);
+    setPeople((current) => draft.id ? current.map((person) => person.id === draft.id ? next : person) : [...current, next]);
+    setSelectedId(next.id);
+    setEditorOpen(false);
+    setEditingPerson(null);
+    setPaymentMessage("");
+    addHistoryItem(setHistory, { status: "success", title: draft.id ? "Person updated" : "Person added", detail: `${next.name} - ${money(getSchedule(next).weeklyPay, 2)} weekly total, paid every ${getSchedule(next).frequencyLabel}` });
+    logEvent(draft.id ? "person.updated" : "person.added", {
+      id: next.id,
+      name: next.name,
+      address: next.address ? shortAddress(next.address) : "none",
+      payMode: next.payMode,
+      weeklyPay: schedule.weeklyPay,
+      perPayment: schedule.perPayment,
+      frequency: schedule.frequencyLabel,
+      paymentsPerWeek: schedule.payments,
+    });
+  };
+
+  const togglePlan = (id) => {
+    const person = people.find((item) => item.id === id);
+    if (!person) return;
+
+    if (person.active) {
+      setPeople((current) => current.map((item) => item.id === id ? { ...item, active: false, nextRunAt: null } : item));
+      setPaymentMessage(`${person.name}'s plan is paused.`);
+      addHistoryItem(setHistory, { status: "paused", title: "Plan paused", detail: person.name });
+      logEvent("plan.paused", { id: person.id, name: person.name });
+      return;
+    }
+
+    const ready = Boolean(signingWallet && person.address?.startsWith("r"));
+    setPeople((current) => current.map((item) => item.id === id ? { ...item, active: true, nextRunAt: ready ? Date.now() : null } : item));
+    setPaymentMessage(ready ? `${person.name}'s plan started. First payment prompt is opening.` : `${person.name}'s plan started. Unlock a wallet phrase and add a destination address to send payments.`);
+    addHistoryItem(setHistory, { status: ready ? "success" : "waiting", title: "Plan started", detail: ready ? `${person.name} - first payment queued now` : `${person.name} - waiting for payer wallet and destination` });
+    logEvent("plan.started", {
+      id: person.id,
+      name: person.name,
+      ready,
+      hasSigningWallet: Boolean(signingWallet),
+      hasDestination: Boolean(person.address?.startsWith("r")),
+      schedule: getSchedule(person),
+    });
+    if (ready) window.setTimeout(() => payInstallment({ ...person, active: true, nextRunAt: Date.now() }, "scheduled"), 150);
+  };
+
+  const payInstallment = async (person, source = "manual") => {
+    const schedule = getSchedule(person);
+    const paidCount = Number(person.paidCount || 0);
+    logEvent("payment.installment.requested", {
+      source,
+      personId: person.id,
+      name: person.name,
+      paidCount,
+      plannedPayments: schedule.payments,
+      perPayment: schedule.perPayment,
+      sourceTag: SOURCE_TAG,
+      payer: signingWallet ? shortAddress(signingWallet.address) : "none",
+      destination: person.address ? shortAddress(person.address) : "none",
+    });
+
+    if (paidCount >= schedule.payments) {
+      setPeople((current) => current.map((item) => item.id === person.id ? { ...item, active: false, nextRunAt: null } : item));
+      addHistoryItem(setHistory, { status: "success", title: "Plan complete", detail: `${person.name} has received all planned installments.` });
+      logEvent("payment.installment.skipped", { reason: "plan_complete", personId: person.id, name: person.name });
+      return;
+    }
+
+    if (!signingWallet || !person.address?.startsWith("r")) {
+      setPaymentMessage(`${person.name} needs an unlocked wallet phrase and destination address.`);
+      addHistoryItem(setHistory, { status: "waiting", title: "Payment waiting", detail: `${person.name} needs an unlocked wallet phrase and destination address.` });
+      logEvent("payment.installment.blocked", {
+        reason: "missing_wallet_or_destination",
+        hasSigningWallet: Boolean(signingWallet),
+        hasDestination: Boolean(person.address?.startsWith("r")),
+      });
+      return;
+    }
+
+    setPaymentMessage("Signing and submitting the installment from the unlocked wallet...");
+    addHistoryItem(setHistory, { status: "waiting", title: source === "manual" ? "Manual payment started" : "Scheduled payment started", detail: `${person.name} - ${money(schedule.perPayment, 4)} - source tag ${SOURCE_TAG}` });
+    logEvent("payment.local_signing.started", {
+      transactionType: "Payment",
+      account: shortAddress(signingWallet.address),
+      destination: shortAddress(person.address),
+      sourceTag: SOURCE_TAG,
+      amount: schedule.perPayment.toFixed(6),
+      issuer: RLUSD_ISSUER,
+    });
+    try {
+      const { result, hash } = await submitRlusdPayment({
+        wallet: signingWallet,
+        destination: person.address,
+        amount: schedule.perPayment.toFixed(6),
+      });
+      const tx = result?.result || result || {};
+      const txHash = hash || tx.hash;
+      const nextPaidCount = paidCount + 1;
+      const complete = nextPaidCount >= schedule.payments;
+      setPeople((current) => current.map((item) => item.id === person.id ? {
+        ...item,
+        paidCount: nextPaidCount,
+        active: complete ? false : item.active,
+        nextRunAt: complete ? null : Date.now() + getFrequencyMs(item),
+      } : item));
+      setPaymentMessage(txHash ? `Payment submitted: ${txHash.slice(0, 10)}...` : "Payment submitted.");
+      addHistoryItem(setHistory, { status: "success", title: complete ? "Final payment submitted" : "Payment submitted", detail: txHash ? `${person.name} - ${money(schedule.perPayment, 4)} - tag ${SOURCE_TAG} - ${txHash}` : `${person.name} - ${money(schedule.perPayment, 4)} - tag ${SOURCE_TAG}` });
+      logEvent("payment.submitted", {
+        personId: person.id,
+        name: person.name,
+        hash: txHash || null,
+        nextPaidCount,
+        complete,
+        nextRunAt: complete ? null : Date.now() + getFrequencyMs(person),
+      });
+    } catch (error) {
+      setPaymentMessage(error?.message || "Payment was not submitted.");
+      setPeople((current) => current.map((item) => item.id === person.id ? { ...item, nextRunAt: Date.now() + 60000 } : item));
+      addHistoryItem(setHistory, { status: "failed", title: "Payment not submitted", detail: `${person.name} - ${error?.message || "Wallet confirmation was cancelled."}` });
+      logEvent("payment.failed", { personId: person.id, name: person.name, source, error, retryAt: Date.now() + 60000 });
+    }
+  };
 
   useEffect(() => {
-    const id = setInterval(() => {
-      setTick(t => t + 1);
-      setBalance(b => b + PER_SEC);
-    }, 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  useEffect(() => () => {
-    streamActiveRef.current = false;
-    window.clearTimeout(streamTimerRef.current);
-  }, []);
-
-  const stopRlusdStream = (message = "RLUSD stream stopped.") => {
-    streamActiveRef.current = false;
-    window.clearTimeout(streamTimerRef.current);
-    streamTimerRef.current = null;
-    setIsStreaming(false);
-    setSettlementStatus((prev) => ({
-      state: prev.state === "error" ? "error" : "idle",
-      message,
-    }));
-  };
-
-  const refreshTreasuryBalance = async ({ silent = false } = {}) => {
-    if (!silent) {
-      setSettlementStatus({ state: "submitting", message: "Reading treasury RLUSD balance from XRPL mainnet." });
-    }
-
-    const nextBalance = await fetchTreasuryRlusdBalance();
-    setTreasuryRlusdBalance(nextBalance);
-
-    if (!silent) {
-      setSettlementStatus({ state: "idle", message: `Treasury balance: ${fmt(nextBalance, 6)} RLUSD.` });
-    }
-
-    return nextBalance;
-  };
-
-  const readTreasuryBalance = () => {
-    refreshTreasuryBalance().catch((error) => {
-      setSettlementStatus({
-        state: "error",
-        message: error?.message || "Could not read treasury wallet balance.",
+    const timer = window.setInterval(() => {
+      const duePerson = people.find((person) =>
+        person.active &&
+        person.nextRunAt &&
+        Number(person.nextRunAt) <= Date.now() &&
+        Number(person.paidCount || 0) < getSchedule(person).payments
+      );
+      if (!duePerson || autoPayingRef.current) return;
+      logEvent("scheduler.due_person_found", {
+        personId: duePerson.id,
+        name: duePerson.name,
+        nextRunAt: duePerson.nextRunAt,
+        paidCount: duePerson.paidCount || 0,
+        schedule: getSchedule(duePerson),
       });
-    });
-  };
-
-  const validateSettlementInputs = () => {
-    const amount = Number(rlusdAmount);
-    if (!workerAddress || !workerAddress.startsWith("r")) {
-      throw new Error("Enter a valid XRPL worker address.");
-    }
-    if (!Number.isFinite(amount) || amount <= 0) {
-      throw new Error("Enter an RLUSD amount greater than zero.");
-    }
-    return amount;
-  };
-
-  const sendSettlement = async (amountValue) => {
-    const tx = await submitCrossmarkPayment({
-      destination: workerAddress,
-      amountValue,
-    });
-
-    if (!tx) {
-      throw new Error("Crossmark did not return a submitted transaction.");
-    }
-
-    setBalance(0);
-    return tx;
-  };
-
-  const runRlusdStreamTick = async () => {
-    if (!streamActiveRef.current) return;
-
-    try {
-      const requestedAmount = validateSettlementInputs();
-      const availableBalance = await refreshTreasuryBalance({ silent: true });
-      if (availableBalance <= 0) {
-        stopRlusdStream("Treasury RLUSD balance is empty. Stream stopped.");
-        return;
-      }
-
-      const amountToSend = normalizeAmount(Math.min(requestedAmount, availableBalance));
-      if (!amountToSend) {
-        stopRlusdStream("No spendable RLUSD balance remains. Stream stopped.");
-        return;
-      }
-
-      setSettlementStatus({
-        state: "submitting",
-        message: `Confirm ${amountToSend} RLUSD in Crossmark. Next stream attempt waits 15 seconds after this one finishes.`,
+      autoPayingRef.current = true;
+      payInstallment(duePerson, "scheduled").finally(() => {
+        autoPayingRef.current = false;
       });
-      await sendSettlement(amountToSend);
+    }, 10000);
 
-      const remainingBalance = await refreshTreasuryBalance({ silent: true });
-      setSettlementStatus({
-        state: "success",
-        message: `Stream sent ${amountToSend} RLUSD. Remaining treasury balance: ${fmt(remainingBalance, 6)} RLUSD.`,
-      });
-
-      if (remainingBalance <= 0) {
-        stopRlusdStream("Treasury RLUSD balance is empty. Stream stopped.");
-        return;
-      }
-
-      streamTimerRef.current = window.setTimeout(runRlusdStreamTick, STREAM_INTERVAL_MS);
-    } catch (error) {
-      streamActiveRef.current = false;
-      window.clearTimeout(streamTimerRef.current);
-      streamTimerRef.current = null;
-      setIsStreaming(false);
-      setSettlementStatus({
-        state: "error",
-        message: error?.message || "RLUSD stream failed.",
-      });
-    }
-  };
-
-  const startRlusdStream = async () => {
-    try {
-      validateSettlementInputs();
-      streamActiveRef.current = true;
-      setIsStreaming(true);
-      window.clearTimeout(streamTimerRef.current);
-      await runRlusdStreamTick();
-    } catch (error) {
-      streamActiveRef.current = false;
-      setIsStreaming(false);
-      setSettlementStatus({
-        state: "error",
-        message: error?.message || "Could not start RLUSD stream.",
-      });
-    }
-  };
-
-  const handleWithdrawConfirm = async (event) => {
-    event.preventDefault();
-
-    try {
-      validateSettlementInputs();
-      setSettlementStatus({ state: "submitting", message: "Confirm the RLUSD payment in Crossmark." });
-      await sendSettlement(normalizeAmount(rlusdAmount));
-      await refreshTreasuryBalance({ silent: true });
-      setSettlementStatus({ state: "success", message: "RLUSD settlement submitted with the Cadence source tag." });
-    } catch (error) {
-      setSettlementStatus({
-        state: "error",
-        message: error?.message || "Crossmark payment failed.",
-      });
-    }
-  };
-
-  const connectCrossmark = async () => {
-    setWallet((prev) => ({ ...prev, status: "connecting", error: "" }));
-
-    try {
-      const result = await crossmark.methods.signInAndWait();
-      const address = getCrossmarkAddress(result);
-
-      if (!address) {
-        throw new Error("Crossmark did not return an active XRPL address.");
-      }
-
-      setWallet({
-        status: "connected",
-        address,
-        error: "",
-        lastTx: null,
-      });
-      return address;
-    } catch (error) {
-      setWallet((prev) => ({
-        ...prev,
-        status: "connect failed",
-        error: error?.message || "Crossmark connection was cancelled.",
-      }));
-      return "";
-    }
-  };
-
-  const submitCrossmarkPayment = async ({ destination, amountValue }) => {
-    const account = wallet.address || DEFAULT_TREASURY_ADDRESS;
-
-    if (wallet.address && account !== DEFAULT_TREASURY_ADDRESS) {
-      throw new Error(`Connect the treasury wallet ${shortAddress(DEFAULT_TREASURY_ADDRESS)} before submitting.`);
-    }
-
-    const result = await crossmark.methods.signAndSubmitAndWait(withCadenceSourceTag({
-      TransactionType: "Payment",
-      Account: account,
-      Destination: destination,
-      Amount: {
-        currency: RLUSD_CURRENCY,
-        issuer: RLUSD_ISSUER,
-        value: amountValue,
-      },
-    }));
-    const tx = getCrossmarkTx(result);
-
-    setWallet((prev) => ({ ...prev, lastTx: tx }));
-
-    return tx;
+    return () => window.clearInterval(timer);
+  }, [people, signingWallet]);
+  const resetWallet = () => {
+    logEvent("wallet.reset", { previousWallet: walletAddress ? shortAddress(walletAddress) : "none", peopleCount: people.length });
+    setScreen("intro");
+    setAccessInput("");
+    setWalletAddress("");
+    setRlusdBalance(0);
+    setSigningWallet(null);
+    setSetupError("");
   };
 
   return (
     <>
       <style>{`
-        @keyframes spPulse {
-          0%,100% { opacity:1; transform:scale(1); }
-          50%      { opacity:.4; transform:scale(.75); }
-        }
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap');
         * { box-sizing: border-box; }
-        button { font-family: inherit; }
+        body { margin: 0; background: ${COLORS.paper}; color: ${COLORS.ink}; font-family: 'DM Sans', sans-serif; }
+        button, input, select { font: inherit; }
+        button { cursor: pointer; }
+        button:disabled { cursor: not-allowed; opacity: .55; }
+        .center-screen { min-height: 100vh; display: grid; place-items: center; padding: 28px; position: relative; overflow: hidden; }
+        .intro-screen { background: linear-gradient(135deg, #fbf8f1 0%, #f3eee2 100%); }
+        .intro-card, .setup-card { width: min(100%, 540px); position: relative; z-index: 1; }
+        .intro-card { padding: 46px 48px; background: rgba(255,253,248,.88); border: 1px solid rgba(231,226,215,.9); border-radius: 28px; box-shadow: 0 24px 70px rgba(72,74,56,.12); text-align: center; }
+        .intro-card > div:first-child { justify-content: center; }
+        .brand-mark { width: 42px; height: 42px; display: grid; place-items: center; background: ${COLORS.ink}; color: #fffdf8; border-radius: 14px 14px 14px 4px; font: 600 25px Georgia, serif; transform: rotate(-5deg); }
+        .intro-card .brand-mark { width: 48px; height: 48px; font-size: 29px; }
+        .intro-sun { margin: 46px 0 14px; color: ${COLORS.coral}; font-size: 32px; }
+        .eyebrow { margin: 0 0 8px; text-transform: uppercase; letter-spacing: .14em; font-size: 10px; font-weight: 700; color: ${COLORS.muted}; }
+        h1, h2, h3, p { margin-top: 0; }
+        h1, h2, h3 { font-family: 'Fraunces', Georgia, serif; font-weight: 600; letter-spacing: -.045em; }
+        h1 { font-size: clamp(42px, 6vw, 65px); line-height: .98; margin-bottom: 20px; }
+        h1 em { color: ${COLORS.coralDark}; font-style: normal; }
+        h2 { font-size: 30px; line-height: 1.05; margin-bottom: 10px; }
+        h3 { font-size: 24px; margin: 0; }
+        .intro-copy, .section-copy { color: ${COLORS.muted}; line-height: 1.65; font-size: 14px; }
+        .intro-copy { max-width: 360px; margin: 0 auto 28px; }
+        .intro-note, .security-note, .footer-note { color: ${COLORS.muted}; font-size: 11px; }
+        .intro-note { margin-top: 20px; }
+        .button { border: 0; border-radius: 12px; padding: 13px 18px; font-weight: 700; color: ${COLORS.ink}; transition: transform .15s ease, box-shadow .15s ease, background .15s ease; }
+        .button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 18px rgba(52,63,53,.12); }
+        .button-primary { background: ${COLORS.ink}; color: #fffdf8; }
+        .button-secondary { background: ${COLORS.card}; border: 1px solid ${COLORS.line}; }
+        .button-soft { background: ${COLORS.mint}; color: ${COLORS.mintDark}; }
+        .button-ghost { padding: 8px 10px; background: transparent; color: ${COLORS.muted}; font-size: 12px; }
+        .button-small { padding: 9px 12px; font-size: 12px; background: ${COLORS.mint}; color: ${COLORS.mintDark}; }
+        .button span { margin-left: 8px; font-size: 16px; }
+        .intro-decoration { position: absolute; border-radius: 50%; filter: blur(1px); opacity: .65; }
+        .decoration-one { width: 260px; height: 260px; top: -90px; right: 12%; background: ${COLORS.butter}; }
+        .decoration-two { width: 330px; height: 330px; bottom: -170px; left: 4%; background: ${COLORS.mint}; }
+        .setup-screen { background: ${COLORS.paper}; }
+        .setup-card { max-width: 480px; padding: 30px; background: ${COLORS.card}; border: 1px solid ${COLORS.line}; border-radius: 24px; box-shadow: 0 18px 50px rgba(72,74,56,.08); }
+        .progress-dots { display: flex; gap: 6px; margin: 38px 0 32px; }
+        .progress-dots span { width: 32px; height: 4px; border-radius: 4px; background: ${COLORS.line}; }
+        .progress-dots .active { background: ${COLORS.coral}; }
+        .setup-card h2 { font-size: 42px; margin-bottom: 14px; }
+        .form-stack { display: grid; gap: 16px; margin: 24px 0; }
+        .field { display: grid; gap: 7px; min-width: 0; }
+        .field-label { font-size: 11px; font-weight: 700; color: ${COLORS.ink}; }
+        .field-help { color: ${COLORS.muted}; font-size: 10px; line-height: 1.4; }
+        input, select { width: 100%; min-height: 43px; padding: 10px 12px; border: 1px solid ${COLORS.line}; border-radius: 10px; background: #fff; color: ${COLORS.ink}; outline: none; }
+        input:focus, select:focus { border-color: ${COLORS.mintDark}; box-shadow: 0 0 0 3px rgba(185,221,203,.35); }
+        .setup-card .button { width: 100%; }
+        .security-note { margin-top: 18px; line-height: 1.45; text-align: center; }
+        .security-note span { color: ${COLORS.coralDark}; font-size: 15px; margin-right: 4px; }
+        .error-message, .success-message { padding: 11px 13px; border-radius: 10px; font-size: 12px; line-height: 1.4; margin-bottom: 14px; }
+        .error-message { color: ${COLORS.coralDark}; background: #fae9e2; }
+        .success-message { color: ${COLORS.mintDark}; background: #e3f2e9; margin-top: 16px; }
+        .app-shell { min-height: 100vh; background: ${COLORS.paper}; }
+        .topbar { height: 74px; padding: 0 clamp(20px, 5vw, 76px); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid ${COLORS.line}; background: rgba(255,253,248,.75); }
+        .topbar-right, .wallet-chip, .welcome-row, .balance-actions, .card-heading, .details-top, .details-actions, .payer-strip { display: flex; align-items: center; }
+        .topbar-right { gap: 12px; }
+        .wallet-chip, .live-pill { gap: 8px; color: ${COLORS.muted}; font-size: 12px; }
+        .wallet-chip { padding: 8px 10px; background: ${COLORS.card}; border: 1px solid ${COLORS.line}; border-radius: 10px; font-family: monospace; }
+        .online-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; background: #65aa7c; box-shadow: 0 0 0 3px rgba(101,170,124,.15); }
+        .dashboard-content { max-width: 1200px; margin: 0 auto; padding: 54px clamp(20px, 5vw, 76px) 40px; }
+        .welcome-row { justify-content: space-between; gap: 20px; margin-bottom: 30px; }
+        .welcome-row h1 { font-size: clamp(38px, 5vw, 58px); margin-bottom: 10px; }
+        .muted-line { margin: 0; color: ${COLORS.muted}; font-size: 13px; }
+        .live-pill { padding: 8px 12px; border-radius: 99px; background: #e7f2e9; color: ${COLORS.mintDark}; font-weight: 700; }
+        .balance-card { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 30px 34px; min-height: 190px; border-radius: 24px; background: ${COLORS.ink}; color: #fffdf8; box-shadow: 0 18px 40px rgba(36,51,45,.16); }
+        .balance-card .eyebrow, .balance-card .muted-line { color: #c1d0c7; }
+        .balance-number { font: 600 clamp(48px, 7vw, 82px)/1 'Fraunces', Georgia, serif; letter-spacing: -.06em; margin: 12px 0 10px; }
+        .balance-actions { gap: 10px; flex-wrap: wrap; }
+        .balance-card .button-secondary { background: #fffdf8; border-color: #fffdf8; }
+        .balance-card .button-soft { background: ${COLORS.mint}; }
+        .payer-strip { justify-content: space-between; gap: 18px; padding: 17px 20px; margin: 14px 0 34px; border: 1px solid ${COLORS.line}; border-radius: 16px; background: ${COLORS.card}; }
+        .payer-strip strong { display: block; font: 600 17px Georgia, serif; }
+        .payer-strip span { display: block; margin-top: 4px; color: ${COLORS.muted}; font-size: 11px; }
+        .content-grid { display: grid; grid-template-columns: minmax(300px, .8fr) minmax(420px, 1.2fr); gap: 16px; align-items: stretch; }
+        .people-card, .details-card, .editor-card { padding: 24px; border: 1px solid ${COLORS.line}; border-radius: 20px; background: ${COLORS.card}; }
+        .card-heading { justify-content: space-between; gap: 12px; margin-bottom: 22px; }
+        .card-heading h2 { font-size: 25px; margin: 0; }
+        .people-list { display: grid; gap: 7px; }
+        .person-row { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto 8px; align-items: center; gap: 10px; width: 100%; padding: 11px; border: 1px solid transparent; border-radius: 14px; background: transparent; text-align: left; color: ${COLORS.ink}; }
+        .person-row:hover, .person-row.selected { background: #f3f7f1; border-color: ${COLORS.mint}; }
+        .avatar, .large-avatar { display: grid; place-items: center; border-radius: 13px; background: ${COLORS.butter}; color: ${COLORS.coralDark}; font-weight: 700; }
+        .avatar { width: 38px; height: 38px; }
+        .person-info, .person-amount { min-width: 0; display: grid; gap: 3px; }
+        .person-info b, .person-amount b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+        .person-info small, .person-amount small { color: ${COLORS.muted}; font-size: 10px; }
+        .person-amount { text-align: right; }
+        .status-dot { width: 7px; height: 7px; border-radius: 50%; background: ${COLORS.line}; }
+        .status-dot.on { background: #65aa7c; }
+        .empty-people, .details-empty { min-height: 290px; display: grid; place-items: center; align-content: center; text-align: center; color: ${COLORS.muted}; }
+        .empty-people p, .details-empty p { max-width: 240px; line-height: 1.55; font-size: 13px; }
+        .empty-scribble, .empty-sun { color: ${COLORS.coral}; font: 34px Georgia, serif; margin-bottom: 12px; }
+        .details-top { gap: 14px; position: relative; }
+        .large-avatar { width: 56px; height: 56px; border-radius: 18px; font-size: 22px; }
+        .details-top h2 { font-size: 30px; margin: 0 0 4px; }
+        .edit-button { margin-left: auto; }
+        .text-button { border: 0; padding: 4px; background: transparent; color: ${COLORS.coralDark}; font-size: 12px; font-weight: 700; }
+        .address-line { display: flex; justify-content: space-between; gap: 12px; padding: 15px 0; margin: 20px 0; border-top: 1px solid ${COLORS.line}; border-bottom: 1px solid ${COLORS.line}; color: ${COLORS.muted}; font-size: 11px; }
+        code { font-family: monospace; color: ${COLORS.ink}; }
+        .detail-highlight { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 16px; padding: 20px; border-radius: 16px; background: #f3eee2; }
+        .detail-highlight strong { display: block; font: 600 28px Georgia, serif; margin: 5px 0; }
+        .detail-highlight small { display: block; color: ${COLORS.muted}; font-size: 10px; }
+        .highlight-arrow { color: ${COLORS.coral}; font-size: 28px; }
+        .details-actions { gap: 10px; flex-wrap: wrap; margin-top: 20px; }
+        .plan-meter { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+        .plan-meter > div { padding: 12px; border: 1px solid ${COLORS.line}; border-radius: 12px; background: #fff; }
+        .plan-meter span, .plan-meter strong { display: block; }
+        .plan-meter span { color: ${COLORS.muted}; font-size: 10px; }
+        .plan-meter strong { margin-top: 4px; font-size: 12px; }
+        .inline-note, .safe-payment-note { color: ${COLORS.muted}; font-size: 11px; line-height: 1.5; }
+        .safe-payment-note { padding: 12px; margin-top: 20px; background: #f6f2e8; border-radius: 10px; }
+        .safe-payment-note span { color: ${COLORS.mintDark}; margin-right: 6px; }
+        .footer-note { max-width: 760px; margin: 24px auto 0; text-align: center; line-height: 1.5; }
+        .history-panel { margin-top: 16px; padding: 24px; border: 1px solid ${COLORS.line}; border-radius: 20px; background: ${COLORS.card}; }
+        .history-list { display: grid; gap: 8px; }
+        .history-row { display: flex; justify-content: space-between; gap: 16px; padding: 12px; border: 1px solid ${COLORS.line}; border-radius: 12px; background: #fff; }
+        .history-row b, .history-row span, .history-row time { display: block; }
+        .history-row b { font-size: 13px; }
+        .history-row span, .history-row time { color: ${COLORS.muted}; font-size: 11px; line-height: 1.4; }
+        .history-row.success { border-color: ${COLORS.mint}; }
+        .history-row.failed { border-color: #efb49f; background: #fff7f3; }
+        .debug-log-list { display: grid; gap: 8px; max-height: 310px; overflow: auto; }
+        .debug-log-row { display: grid; grid-template-columns: 150px 180px minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px; border: 1px solid ${COLORS.line}; border-radius: 10px; background: #fff; }
+        .debug-log-row time, .debug-log-row b, .debug-log-row code { font-size: 10px; line-height: 1.4; }
+        .debug-log-row time { color: ${COLORS.muted}; }
+        .debug-log-row b { color: ${COLORS.ink}; }
+        .debug-log-row code { white-space: pre-wrap; word-break: break-word; color: ${COLORS.muted}; }
+        .editor-card { grid-column: 1 / -1; }
+        .editor-heading { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 22px; }
+        .editor-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+        .pay-plan-box { margin: 22px 0; padding: 18px; border-radius: 16px; background: #f3eee2; }
+        .pay-plan-title { font: 600 18px Georgia, serif; margin-bottom: 16px; }
+        .mode-toggle { display: inline-flex; align-items: center; gap: 9px; margin-bottom: 16px; padding: 9px 11px; border: 1px solid ${COLORS.line}; border-radius: 10px; background: #fff; color: ${COLORS.ink}; font-size: 12px; font-weight: 700; }
+        .mode-toggle input { width: 16px; min-height: 16px; padding: 0; accent-color: ${COLORS.mintDark}; }
+        .plan-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .input-with-symbol { position: relative; }
+        .input-with-symbol span { position: absolute; left: 12px; top: 12px; color: ${COLORS.muted}; }
+        .input-with-symbol input { padding-left: 26px; }
+        .schedule-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding-top: 18px; margin-top: 18px; border-top: 1px solid ${COLORS.line}; }
+        .schedule-summary > div { display: grid; gap: 5px; }
+        .summary-label { color: ${COLORS.muted}; font-size: 10px; }
+        .schedule-summary strong { font: 600 18px Georgia, serif; }
+        .modal-backdrop { position: fixed; z-index: 10; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(36,51,45,.35); }
+        .modal-card { width: min(100%, 430px); position: relative; padding: 34px; border-radius: 22px; background: ${COLORS.card}; box-shadow: 0 20px 70px rgba(36,51,45,.25); }
+        .modal-close { position: absolute; top: 15px; right: 17px; border: 0; background: transparent; color: ${COLORS.muted}; font-size: 26px; }
+        .modal-icon { color: ${COLORS.coral}; font-size: 40px; margin-bottom: 20px; }
+        .modal-card h2 { font-size: 38px; }
+        .funding-steps { display: grid; gap: 13px; margin: 22px 0 26px; }
+        .funding-steps > div { display: grid; grid-template-columns: 25px 1fr; gap: 9px; align-items: start; color: ${COLORS.muted}; font-size: 12px; line-height: 1.45; }
+        .funding-steps b { display: grid; place-items: center; width: 23px; height: 23px; border-radius: 50%; background: ${COLORS.mint}; color: ${COLORS.mintDark}; font-size: 11px; }
+        @media (max-width: 760px) {
+          .topbar { height: auto; padding: 18px 20px; gap: 14px; flex-wrap: wrap; }
+          .topbar-right { width: 100%; justify-content: space-between; }
+          .dashboard-content { padding-top: 32px; }
+          .welcome-row, .balance-card, .payer-strip { align-items: flex-start; flex-direction: column; }
+          .balance-card { padding: 25px; }
+          .content-grid { grid-template-columns: 1fr; }
+          .debug-log-row { grid-template-columns: 1fr; }
+          .plan-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+        @media (max-width: 480px) {
+          .intro-card, .setup-card, .people-card, .details-card, .editor-card { padding: 22px; }
+          .intro-card { border-radius: 20px; }
+          .intro-card .brand-mark { width: 42px; height: 42px; font-size: 25px; }
+          .detail-highlight { gap: 8px; padding: 14px; }
+          .detail-highlight strong { font-size: 22px; }
+          .editor-grid, .plan-grid, .schedule-summary { grid-template-columns: 1fr; }
+          .schedule-summary { gap: 14px; }
+          .person-row { grid-template-columns: 36px minmax(0, 1fr) 8px; }
+          .person-amount { display: none; }
+        }
       `}</style>
-      <div style={{
-        display: "flex", minHeight: "100vh",
-        background: T.bg, color: T.text, fontFamily: "system-ui,sans-serif",
-      }}>
-        <Sidebar tab={tab} setTab={setTab} />
-
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-          {/* Top bar */}
-          <div style={{
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-            padding: "14px 20px", borderBottom: `1px solid ${T.border}`,
-            background: T.surf, flexShrink: 0, flexWrap: "wrap", gap: 10,
-          }}>
-            <div style={{ display: "flex", gap: 6 }}>
-              {[
-                { id: "worker",   label: "Worker" },
-                { id: "employer", label: "Treasury" },
-                { id: "nullmark", label: "Proofs" },
-              ].map(t => (
-                <button key={t.id} onClick={() => setTab(t.id)} style={{
-                  padding: "6px 14px", borderRadius: 8, border: "none", cursor: "pointer",
-                  fontSize: 12, fontWeight: tab === t.id ? 700 : 400,
-                  background: tab === t.id ? T.greenDim : "transparent",
-                  color: tab === t.id ? T.green : T.muted,
-                  transition: "all 0.15s",
-                }}>{t.label}</button>
-              ))}
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <Pill label="Crossmark ready" color={T.green} />
-              <WalletStatus wallet={wallet} onConnect={connectCrossmark} />
-              <div style={{ fontFamily: T.mono, fontSize: 11, color: T.muted }}>
-                {new Date().toLocaleTimeString()}
-              </div>
-            </div>
-          </div>
-
-          {/* Main scroll area */}
-          <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-            {showWithdraw && (
-              <SettlementPanel
-                balance={balance}
-                onClose={() => {
-                  if (isStreaming) stopRlusdStream();
-                  setShow(false);
-                }}
-                onConfirm={handleWithdrawConfirm}
-                workerAddress={workerAddress}
-                setWorkerAddress={setWorkerAddress}
-                rlusdAmount={rlusdAmount}
-                setRlusdAmount={setRlusdAmount}
-                settlementStatus={settlementStatus}
-                wallet={wallet}
-                treasuryRlusdBalance={treasuryRlusdBalance}
-                onRefreshBalance={readTreasuryBalance}
-                onStartStream={startRlusdStream}
-                onStopStream={() => stopRlusdStream()}
-                isStreaming={isStreaming}
-              />
-            )}
-            {tab === "worker"   && (
-              <WorkerView
-                balance={balance}
-                tick={tick}
-                onWithdraw={() => {
-                  setShow(true);
-                  readTreasuryBalance();
-                }}
-              />
-            )}
-            {tab === "employer" && (
-              <EmployerView
-                treasuryRlusdBalance={treasuryRlusdBalance}
-                onRefreshBalance={readTreasuryBalance}
-                balanceStatus={settlementStatus.message}
-              />
-            )}
-            {tab === "nullmark" && <ProofsView />}
-          </div>
-        </div>
-      </div>
+      {screen === "intro" && <Intro onStart={() => { setSetupError(""); setScreen("setup"); }} />}
+      {screen === "setup" && <WalletSetup method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} onSubmit={finishSetup} error={setupError} />}
+      {screen === "dashboard" && (
+        <>
+          {editorOpen ? (
+            <div className="app-shell"><header className="topbar"><Brand compact /><Button kind="ghost" onClick={() => setEditorOpen(false)}>Back to dashboard</Button></header><main className="dashboard-content"><PersonEditor person={editingPerson} onSave={savePerson} onCancel={() => { setEditorOpen(false); setEditingPerson(null); }} /></main></div>
+          ) : <Dashboard walletAddress={walletAddress} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} onOpenFunding={() => setShowFunding(true)} onReset={resetWallet} people={people} onAdd={() => { setEditingPerson(null); setEditorOpen(true); }} selectedId={selectedId} onSelect={setSelectedId} onSave={savePerson} onEdit={(person) => { setEditingPerson(person); setEditorOpen(true); }} onToggle={togglePlan} onPay={payInstallment} paymentMessage={paymentMessage} history={history} debugLogs={debugLogs} onExportLogs={exportLogs} onClearLogs={clearLogs} />}
+          {showFunding && <FundingModal onClose={() => setShowFunding(false)} />}
+        </>
+      )}
     </>
   );
 }

@@ -1,141 +1,185 @@
 # Cadence
 
-Real-time RLUSD payroll on the XRP Ledger, built for workers who need income they can receive, verify, and reuse.
+Cadence is a local desktop prototype for scheduling small RLUSD payments on the XRP Ledger. It unlocks an XRPL wallet from a family seed or mnemonic, reads the wallet's RLUSD balance on XRPL mainnet, and can sign and submit scheduled or manual RLUSD `Payment` transactions from that wallet.
 
-Cadence is a payroll-to-reputation prototype for the borderless workforce. It lets an employer treasury stream RLUSD to a worker wallet on XRPL mainnet, sign transactions with Crossmark, and prepare those payments to become portable income proofs for rentals, lending, off-ramping, and other trust-based workflows.
+This build is intended for local testing and demo work. It includes payment-plan setup, payment history, diagnostics, and Electron renderer logging.
 
-Live app: [https://cadence-green-ten.vercel.app](https://cadence-green-ten.vercel.app)
+## Run From latest.zip
 
-## Why It Matters
+1. Install Node.js LTS from [nodejs.org](https://nodejs.org/).
+2. Download `latest.zip` from this repo.
+3. Unzip it.
+4. Open a terminal in the unzipped folder.
+5. Install dependencies:
 
-Global workers are often paid through slow rails, fragmented apps, and records that are hard to reuse. Cadence demonstrates a simpler path:
-
-- Employers keep payroll liquidity in an XRPL treasury wallet.
-- Workers receive RLUSD in a wallet they control.
-- Every payment can be verified on mainnet.
-- Income history becomes a foundation for reusable economic reputation.
-
-The current MVP focuses on the first proof point: a real, mainnet-verifiable RLUSD transfer from treasury to worker with the required Cadence source tag.
-
-## Current Demo
-
-The deployed app supports a live treasury-to-worker RLUSD settlement flow.
-
-- Network: XRPL mainnet
-- Wallet signing: Crossmark
-- Asset: RLUSD
-- Source tag: `2606250005`
-- Treasury wallet: `rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864`
-- Worker wallet: `rBKBuortXq4PYQFH768fzLZXJ1EZWhwbbi`
-- RLUSD issuer: `rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De`
-- RLUSD currency code: `524C555344000000000000000000000000000000`
-
-## Demo Script
-
-1. Open [https://cadence-green-ten.vercel.app](https://cadence-green-ten.vercel.app).
-2. Connect Crossmark with the treasury wallet.
-3. Confirm the worker wallet has an RLUSD trustline.
-4. Open the Treasury view.
-5. Click `Read wallet balance` to fetch the treasury RLUSD balance from XRPL mainnet.
-6. Enter an RLUSD amount.
-7. Click `Send once` for a single settlement, or `Start 15s stream` to send the amount every 15 seconds until the treasury balance is depleted.
-8. Approve each payment in Crossmark.
-9. Verify the submitted transaction on an XRPL explorer and confirm `SourceTag: 2606250005`.
-
-For a quick test transaction, enter `2` RLUSD and use `Send once`.
-
-## What Is Implemented
-
-- React dashboard for worker, treasury, and proof views.
-- Crossmark wallet connection.
-- XRPL mainnet balance reads over `wss://s1.ripple.com`.
-- RLUSD `Payment` transaction construction.
-- Treasury-to-worker payment submission through Crossmark.
-- Automatic `SourceTag: 2606250005` on settlement transactions.
-- Optional 15-second streaming loop that submits repeated payments until available treasury RLUSD runs out.
-- Empty-state UI for receipts, proofs, and pay rails instead of fake production data.
-
-## Product Vision
-
-Cadence connects payroll, settlement, and reputation:
-
-- Real-time payroll: Workers can receive earned value faster than traditional payroll cycles.
-- Treasury controls: Employers can fund a payroll wallet and settle from available RLUSD balance.
-- Portable proofs: Workers can turn verified income history into reusable attestations.
-- Privacy-aware verification: Future proof flows can disclose eligibility or income bands without exposing every payroll detail.
-
-## XRPL Fit
-
-XRPL is a strong fit for this use case because it offers fast settlement, low transaction costs, issued assets, and mature wallet tooling. RLUSD gives the payroll flow a stable-value asset, while XRPL transaction metadata gives Cadence a public verification layer for payment history.
-
-Future XRPL-aligned extensions may include escrow-based payroll controls, DID-based worker identity, credential issuance, and privacy-preserving income attestations.
-
-## Architecture
-
-```text
-Employer Treasury Wallet
-        |
-        | Crossmark signs RLUSD Payment
-        v
-XRPL Mainnet
-        |
-        | Verifiable transaction with SourceTag 2606250005
-        v
-Worker Wallet
-        |
-        | Future proof layer
-        v
-Portable Income Credentials
+```powershell
+npm install
 ```
 
-## Local Development
+6. Start the desktop app:
+
+```powershell
+npm run desktop:dev
+```
+
+If Windows PowerShell blocks `npm`, use the command shim directly:
+
+```powershell
+npm.cmd install
+npm.cmd run desktop:dev
+```
+
+The Electron app window will open. The Vite dev server is also available at `http://127.0.0.1:5173/`.
+
+## What This Version Does
+
+- Unlocks an XRPL wallet locally from either an XRPL family seed or mnemonic phrase.
+- Reads the unlocked wallet's RLUSD trustline balance from XRPL mainnet.
+- Lets you add people with names, roles, emails, destination XRPL addresses, and pay schedules.
+- Supports weekly pay or hourly pay converted into a weekly total.
+- Splits weekly pay into installments at selectable frequencies: 15 seconds, 30 seconds, 1 minute, 5 minutes, 15 minutes, 1 hour, or 1 day.
+- Starts, pauses, and resumes payment plans.
+- Sends a manual installment or queues scheduled installments when a plan is active.
+- Signs RLUSD payments locally with `xrpl` and submits them through `wss://s1.ripple.com`.
+- Adds `SourceTag: 2606250005` to submitted payment transactions.
+- Tracks recent payment and setup activity in an in-app history panel.
+- Stores up to 500 debug log entries in browser `localStorage`.
+- Exports or clears debug logs from the dashboard.
+- Writes Electron renderer console messages to a desktop log file.
+
+## Important Safety Notes
+
+This app can sign real XRPL mainnet transactions. Treat it carefully.
+
+- Do not paste a production wallet secret into code or screens you do not trust.
+- Use a test-funded wallet for demos whenever possible.
+- Check the destination address, RLUSD issuer, amount, and source tag before relying on any payment.
+- Network fees and issuer trustline behavior are controlled by XRPL mainnet conditions.
+- The app keeps debug logs in local browser storage; avoid putting sensitive secrets into names, roles, or other non-secret fields.
+
+## RLUSD / XRPL Constants
+
+- Network: XRPL mainnet
+- WebSocket endpoint: `wss://s1.ripple.com`
+- Asset: RLUSD
+- RLUSD issuer: `rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De`
+- RLUSD currency code: `524C555344000000000000000000000000000000`
+- Source tag: `2606250005`
+
+## Demo Flow
+
+1. Launch the desktop app with `npm run desktop:dev`.
+2. Click through the intro screen.
+3. Choose the wallet phrase type:
+   - `XRPL family seed` for a seed that usually starts with `s`.
+   - `Mnemonic seed phrase` for a 12- or 24-word phrase.
+4. Enter the wallet phrase to unlock the local signing wallet.
+5. Let Cadence read the wallet's RLUSD balance.
+6. Add a person with a destination XRPL address.
+7. Choose either weekly pay or hourly pay.
+8. Pick the installment frequency.
+9. Save the payment plan.
+10. Start the plan or click the manual payment action.
+11. Review the history and diagnostics panels for submitted, blocked, or failed payment events.
+
+## Diagnostics And Logs
+
+The dashboard includes a diagnostics panel that shows recent structured app events. These are stored in `localStorage` under:
+
+```text
+cadence-debug-logs-v1
+```
+
+Use `Export logs` in the app to download the current debug log JSON.
+
+Electron also records renderer console messages and load failures here on Windows:
+
+```text
+C:\Users\<you>\AppData\Roaming\Electron\cadence-renderer.log
+```
+
+Common harmless development messages include Vite startup logs, the React DevTools suggestion, and Electron's development Content Security Policy warning.
+
+## Project Structure
+
+```text
+.
+|-- electron/
+|   |-- dev-runner.cjs   # Starts Vite, waits for port 5173, then opens Electron
+|   `-- main.cjs         # Electron BrowserWindow and renderer log capture
+|-- src/
+|   |-- main.jsx         # React entry point
+|   `-- StreamPayDashboard.jsx
+|-- index.html
+|-- package.json
+|-- vite.config.js
+`-- vercel.json
+```
+
+## Scripts
 
 ```bash
-npm install
 npm run dev
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173).
+Starts the Vite web app at `http://127.0.0.1:5173/`.
 
-## Build
+```bash
+npm run desktop:dev
+```
+
+Starts Vite and opens the Electron desktop shell.
 
 ```bash
 npm run build
 ```
 
-## Vercel Deployment
+Builds the Vite app into `dist/`.
 
-This repository is configured for Vercel as a Vite single-page app.
+```bash
+npm run desktop
+```
 
-- Build command: `npm run build`
-- Output directory: `dist`
-- Framework: Vite
+Builds the app and opens the packaged-style Electron entry using `dist/index.html`.
 
-To deploy, import the GitHub repository into Vercel or push to the connected production branch.
+```bash
+npm run preview
+```
+
+Previews the production build with Vite.
 
 ## Dependencies
 
-- React
-- Vite
-- XRPL.js
-- Crossmark SDK
+- React 19
+- Vite 7
+- Electron 39
+- xrpl
 - Recharts
+- Crossmark SDK package is installed, but this version's payment flow signs locally with `xrpl`.
 
-## Current Status And Disclosures
+## Troubleshooting
 
-Cadence is a hackathon-ready MVP. The live settlement path uses real XRPL mainnet reads and Crossmark-signed RLUSD payment payloads. The proof, SecretVM, zkVerify, and portable credential panels represent the product direction and presentation layer unless otherwise connected in a later implementation.
+If the desktop app opens to a blank or stale screen, another project may already be using port `5173`. Stop the old Vite/Electron process and restart this app from the current folder.
 
-Crossmark approval is expected for each transaction. Streaming payments submit one transaction at a time and require wallet confirmation according to the connected wallet's signing behavior.
+If `npm run desktop:dev` fails on Windows with `spawn EINVAL`, change the Vite spawn in `electron/dev-runner.cjs` to use the Windows shell:
 
-## Roadmap
+```js
+shell: process.platform === "win32",
+```
 
-- Persist settlement receipts after successful submission.
-- Add explorer links for submitted transaction hashes.
-- Add worker-side RLUSD balance reads.
-- Add proof generation from verified payroll history.
-- Add credential export for lender, landlord, and off-ramp workflows.
-- Add treasury policy controls for limits, schedules, and worker allowlists.
+If the app reports an RLUSD balance of zero, confirm the unlocked wallet has an RLUSD trustline to the issuer listed above and that it is funded on XRPL mainnet.
 
-## License
+If a payment is blocked, confirm the wallet is unlocked and the person has a destination XRPL address that starts with `r`.
 
-Prototype for Cadence XRPL payroll experimentation.
+## Deployment
+
+The repository includes `vercel.json` and can build as a Vite single-page app:
+
+- Build command: `npm run build`
+- Output directory: `dist`
+
+The Electron desktop shell is for local execution. A hosted web build will not behave exactly like the desktop app if browser wallet/security behavior differs.
+
+## Status
+
+Cadence is a prototype for RLUSD payroll scheduling and diagnostics. It demonstrates local XRPL signing, mainnet RLUSD balance reads, scheduled installment logic, transaction source tagging, and local debug visibility. It is not production payroll software.
