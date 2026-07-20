@@ -346,7 +346,8 @@ function Field({ label, children, help }) {
   );
 }
 
-function Intro({ onStart }) {
+function Intro({ method, setMethod, accessInput, setAccessInput, onSubmit, error }) {
+  const activeMethod = ACCESS_METHODS.find((item) => item.value === method);
   return (
     <div className="center-screen intro-screen">
       <div className="intro-decoration decoration-one" />
@@ -357,10 +358,30 @@ function Intro({ onStart }) {
         <p className="eyebrow">A gentler way to pay</p>
         <h1>Make every payment<br /><em>feel effortless.</em></h1>
         <p className="intro-copy">
-          Cadence helps you set up simple RLUSD payment plans for the people you work with, one clear step at a time.
+          Connect your XRPL wallet to read real RLUSD income, verify on-chain payments, and manage Cadence payment plans.
         </p>
-        <Button onClick={onStart}>Set up your wallet <span>{">"}</span></Button>
-        <div className="intro-note">Local testing mode  your access input is never saved</div>
+        <div className="intro-connect-form">
+          <Field label="Wallet phrase method">
+            <select value={method} onChange={(event) => setMethod(event.target.value)}>
+              {ACCESS_METHODS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+            </select>
+          </Field>
+          <Field label={activeMethod.label} help={`${activeMethod.hint}. Used locally to unlock this session.`}>
+            <input
+              value={accessInput}
+              onChange={(event) => setAccessInput(event.target.value)}
+              type="password"
+              autoComplete="off"
+              placeholder={`Enter ${activeMethod.hint.toLowerCase()}`}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") onSubmit();
+              }}
+            />
+          </Field>
+          {error && <div className="error-message">{error}</div>}
+          <Button onClick={onSubmit}>Connect wallet <span>{">"}</span></Button>
+        </div>
+        <div className="intro-note">Your phrase stays in memory for this session and is redacted from exported logs.</div>
       </div>
     </div>
   );
@@ -1133,6 +1154,8 @@ export default function CadenceDashboard() {
         .intro-copy { max-width: 360px; margin: 0 auto 28px; }
         .intro-note, .security-note, .footer-note { color: ${COLORS.muted}; font-size: 11px; }
         .intro-note { margin-top: 20px; }
+        .intro-connect-form { display: grid; gap: 14px; max-width: 390px; margin: 0 auto; text-align: left; }
+        .intro-connect-form .button { width: 100%; }
         .button { border: 0; border-radius: 12px; padding: 13px 18px; font-weight: 700; color: ${COLORS.ink}; transition: transform .15s ease, box-shadow .15s ease, background .15s ease; }
         .button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 18px rgba(52,63,53,.12); }
         .button-primary { background: ${COLORS.ink}; color: #fffdf8; }
@@ -1348,7 +1371,7 @@ export default function CadenceDashboard() {
           .person-amount { display: none; }
         }
       `}</style>
-      {screen === "intro" && <Intro onStart={() => { setSetupError(""); setScreen("setup"); }} />}
+      {screen === "intro" && <Intro method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} onSubmit={finishSetup} error={setupError} />}
       {screen === "setup" && <WalletSetup method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} onSubmit={finishSetup} error={setupError} />}
       {screen === "dashboard" && (
         <>
