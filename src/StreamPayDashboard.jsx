@@ -723,59 +723,66 @@ function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onR
   );
 }
 
-function EmployeeDashboard({ walletAddress, people, onBack, onExportLogs, onReset }) {
+function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefreshBalance, people, onBack, onExportLogs, onReset }) {
+  const connectedWallet = walletAddress?.startsWith("r") ? walletAddress : "";
   const samplePerson = {
-    name: "Maurice",
+    name: "Connected wallet",
     role: "Employee",
     address: walletAddress,
-    weeklyPay: "640",
+    weeklyPay: "0",
     frequency: "seconds15",
-    paidCount: 1335,
+    paidCount: 0,
   };
   const employee = people.find((person) => person.active) || people[0] || samplePerson;
   const schedule = getSchedule({ ...employee, frequency: employee.frequency || "seconds15" });
-  const startingPaid = Number(employee.paidCount || samplePerson.paidCount);
-  const [paidCount, setPaidCount] = useState(startingPaid);
-  const [msToNext, setMsToNext] = useState(15000);
   const [withdrawn, setWithdrawn] = useState(false);
-  const [employeeHistory, setEmployeeHistory] = useState(() => makeEmployeeHistory(schedule.perPayment));
   const [employeeView, setEmployeeView] = useState("proof");
+  const [employeeProofData, setEmployeeProofData] = useState(null);
+  const [employeeProofLoading, setEmployeeProofLoading] = useState(false);
+  const [employeeProofError, setEmployeeProofError] = useState("");
 
   useEffect(() => {
-    setPaidCount(Number(employee.paidCount || samplePerson.paidCount));
-    setMsToNext(15000);
     setWithdrawn(false);
-    setEmployeeHistory(makeEmployeeHistory(schedule.perPayment));
-  }, [employee.id, schedule.perPayment]);
+  }, [employee.id]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      setMsToNext((current) => {
-        const next = current - 200;
-        if (next > 0) return next;
-        setPaidCount((count) => Math.min(schedule.payments, count + 1));
-        setEmployeeHistory((currentHistory) => {
-          const hash = Math.abs(Date.now()).toString(16).toUpperCase().slice(-8);
-          return [{
-            time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-            amount: schedule.perPayment.toFixed(6),
-            hash: `${hash}...`,
-            status: "Completed",
-          }, ...currentHistory].slice(0, 8);
-        });
-        return 15000;
-      });
-    }, 200);
+    let cancelled = false;
+    const refreshEmployeeProof = async () => {
+      if (!connectedWallet) {
+        setEmployeeProofData(null);
+        setEmployeeProofError("Connect a wallet to read employee dashboard data.");
+        return;
+      }
+      setEmployeeProofLoading(true);
+      setEmployeeProofError("");
+      setEmployeeProofData(null);
+      try {
+        const data = await readIncomeProofData(connectedWallet, CADENCE_EMPLOYER_WALLET);
+        if (!cancelled) setEmployeeProofData(data);
+      } catch (error) {
+        if (!cancelled) setEmployeeProofError(error?.message || "Could not read employee wallet transactions.");
+      } finally {
+        if (!cancelled) setEmployeeProofLoading(false);
+      }
+    };
 
-    return () => window.clearInterval(timer);
-  }, [schedule.payments, schedule.perPayment]);
+    refreshEmployeeProof();
+    return () => {
+      cancelled = true;
+    };
+  }, [connectedWallet]);
 
-  const cappedPaid = Math.min(paidCount, schedule.payments);
-  const balanceAccrued = cappedPaid * schedule.perPayment;
-  const progressPct = Math.min(100, (cappedPaid / schedule.payments) * 100);
-  const displayBalance = money(balanceAccrued, 2);
+  const incomeRows = employeeProofData?.incomeRows || [];
+  const newestPayment = incomeRows[0] || null;
+  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const verifiedLastSevenDays = incomeRows
+    .filter((row) => new Date(row.iso).getTime() >= sevenDaysAgo)
+    .reduce((sum, row) => sum + row.amount, 0);
+  const expectedWeekly = schedule.weeklyPay > 0 ? schedule.weeklyPay : verifiedLastSevenDays;
+  const progressPct = expectedWeekly > 0 ? Math.min(100, (verifiedLastSevenDays / expectedWeekly) * 100) : 0;
+  const displayBalance = money(rlusdBalance, 2);
   const [balanceWhole, balanceCents = "00"] = displayBalance.replace("$", "").split(".");
-  const employeeName = employee.name || "Maurice";
+  const employeeName = employee.name || "Connected wallet";
   const employerWallet = "rEfcBKr...DE864";
 
   if (employeeView === "proof") {
@@ -799,7 +806,7 @@ function EmployeeDashboard({ walletAddress, people, onBack, onExportLogs, onRese
           <div>
             <p className="eyebrow"><span className="online-dot" /> Good to see you, {employeeName}</p>
             <h1>Your pay, streaming in</h1>
-            <p className="muted-line">RLUSD arrives every {schedule.frequencyLabel}, straight from Cadence without waiting on payday.</p>
+            <p className="muted-line">Real RLUSD balance and Cadence-tagged income for the currently connected wallet.</p>
           </div>
           <div className="live-pill"><span className="online-dot" />Employee dashboard</div>
         </div>
@@ -809,13 +816,14 @@ function EmployeeDashboard({ walletAddress, people, onBack, onExportLogs, onRese
             <div>
               <p className="eyebrow">Available balance RLUSD</p>
               <div className="employee-balance-number">${balanceWhole}<span>.{balanceCents}</span></div>
-              <p>{money(schedule.perPayment, 6)} every {schedule.frequencyLabel} - {money(schedule.weeklyPay)} this week</p>
+              <p>{balanceLoading ? "Reading XRPL balance..." : `Read from ${shortAddress(connectedWallet)} on XRPL mainnet`}</p>
             </div>
             <div className="employee-live-tag"><span className="online-dot" />Live</div>
           </div>
           <div className="employee-balance-footer">
-            <code>{shortAddress(walletAddress || employee.address)}</code>
+            <code>{connectedWallet || "No wallet connected"}</code>
             <div>
+              <Button kind="secondary" onClick={onRefreshBalance} disabled={balanceLoading}>{balanceLoading ? "Reading..." : "Refresh balance"}</Button>
               <Button kind="soft" onClick={() => setWithdrawn(true)} disabled={withdrawn}>{withdrawn ? "Withdrawal queued" : "Withdraw"}</Button>
               {withdrawn && <p>Funds settle in your linked account shortly.</p>}
             </div>
@@ -824,16 +832,16 @@ function EmployeeDashboard({ walletAddress, people, onBack, onExportLogs, onRese
 
         <div className="employee-stat-grid">
           <section className="employee-card">
-            <p className="eyebrow">Earned this week</p>
-            <strong>{money(balanceAccrued)}</strong>
-            <span>of a {money(schedule.weeklyPay)} weekly rhythm</span>
+            <p className="eyebrow">Verified last 7 days</p>
+            <strong>{money(verifiedLastSevenDays)}</strong>
+            <span>{employeeProofLoading ? "Reading Cadence-tagged payments..." : `from ${incomeRows.length.toLocaleString()} fetched income payment(s)`}</span>
             <div className="employee-progress"><div style={{ width: `${progressPct}%` }} /></div>
-            <small>{cappedPaid.toLocaleString()} / {schedule.payments.toLocaleString()} payouts this week</small>
+            <small>{expectedWeekly > 0 ? `${money(verifiedLastSevenDays)} / ${money(expectedWeekly)} reference weekly amount` : "No weekly reference amount yet"}</small>
           </section>
           <section className="employee-card">
-            <p className="eyebrow">Next payment</p>
-            <strong>{money(schedule.perPayment, 6)}</strong>
-            <span>arrives in {(msToNext / 1000).toFixed(1)}s</span>
+            <p className="eyebrow">Latest verified payment</p>
+            <strong>{newestPayment ? money(newestPayment.amount, 6) : "$0.000000"}</strong>
+            <span>{newestPayment ? newestPayment.time : employeeProofError || "No Cadence-tagged RLUSD payment found"}</span>
             <div className="employee-meta-row">
               <div><small>Source tag</small><b>{SOURCE_TAG}</b></div>
               <div><small>Paid by</small><b>{employerWallet}</b></div>
@@ -844,20 +852,23 @@ function EmployeeDashboard({ walletAddress, people, onBack, onExportLogs, onRese
         <section className="employee-card employee-history-card">
           <div className="card-heading">
             <div><p className="eyebrow">Payment history</p><h2>Recent RLUSD received</h2></div>
-            <span className="employee-live-tag">{employeeHistory.length} shown</span>
+            <span className="employee-live-tag">{incomeRows.slice(0, 8).length} shown</span>
           </div>
           <div className="employee-table-wrap">
             <table className="employee-table">
               <thead><tr><th>Time</th><th>Amount</th><th>Transaction</th><th>Status</th></tr></thead>
               <tbody>
-                {employeeHistory.map((row, index) => (
-                  <tr key={`${row.time}-${row.hash}-${index}`}>
+                {incomeRows.slice(0, 8).map((row, index) => (
+                  <tr key={`${row.hash}-${row.ledgerIndex || index}`}>
                     <td>{row.time}</td>
-                    <td>${row.amount}</td>
-                    <td>{row.hash}</td>
-                    <td><span>{row.status}</span></td>
+                    <td>${row.amount.toFixed(6)}</td>
+                    <td>{row.hash.slice(0, 10)}...{row.hash.slice(-6)}</td>
+                    <td><span>Verified</span></td>
                   </tr>
                 ))}
+                {!incomeRows.length && (
+                  <tr><td colSpan="4">{employeeProofLoading ? "Reading XRPL payment history..." : employeeProofError || "No Cadence-tagged RLUSD payments found for this connected wallet."}</td></tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -1409,7 +1420,7 @@ export default function CadenceDashboard() {
           {editorOpen ? (
             <div className="app-shell"><header className="topbar"><Brand compact /><Button kind="ghost" onClick={() => setEditorOpen(false)}>Back to dashboard</Button></header><main className="dashboard-content"><PersonEditor person={editingPerson} onSave={savePerson} onCancel={() => { setEditorOpen(false); setEditingPerson(null); }} /></main></div>
           ) : dashboardView === "employee" ? (
-            <EmployeeDashboard walletAddress={walletAddress} people={people} onBack={() => setDashboardView("employer")} onExportLogs={exportLogs} onReset={resetWallet} />
+            <EmployeeDashboard walletAddress={walletAddress} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} people={people} onBack={() => setDashboardView("employer")} onExportLogs={exportLogs} onReset={resetWallet} />
           ) : <Dashboard walletAddress={walletAddress} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} onOpenFunding={() => setShowFunding(true)} onReset={resetWallet} people={people} onAdd={() => { setEditingPerson(null); setEditorOpen(true); }} selectedId={selectedId} onSelect={setSelectedId} onSave={savePerson} onEdit={(person) => { setEditingPerson(person); setEditorOpen(true); }} onToggle={togglePlan} onPay={payInstallment} paymentMessage={paymentMessage} history={history} debugLogs={debugLogs} onExportLogs={exportLogs} onClearLogs={clearLogs} onOpenEmployee={() => setDashboardView("employee")} />}
           {showFunding && <FundingModal onClose={() => setShowFunding(false)} />}
         </>
