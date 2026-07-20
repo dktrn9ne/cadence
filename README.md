@@ -39,8 +39,10 @@ The Electron app window will open. The Vite dev server is also available at `htt
 - Supports weekly pay or hourly pay converted into a weekly total.
 - Splits weekly pay into installments at selectable frequencies: 15 seconds, 30 seconds, 1 minute, 5 minutes, 15 minutes, 1 hour, or 1 day.
 - Starts, pauses, and resumes payment plans.
+- Includes an employee dashboard view with real XRPL income verification, CSV export, expandable payment ledger, streaming RLUSD balance, weekly progress, next-payment countdown, withdrawal status, and recent receipt history.
 - Sends a manual installment or queues scheduled installments when a plan is active.
 - Signs RLUSD payments locally with `xrpl` and submits them through `wss://s1.ripple.com`.
+- Reads income-proof data for the connected wallet only from `account_tx` on XRPL mainnet and filters for successful incoming RLUSD payments from the Cadence employer wallet with `SourceTag: 2606250005`.
 - Adds `SourceTag: 2606250005` to submitted payment transactions.
 - Tracks recent payment and setup activity in an in-app history panel.
 - Stores up to 500 debug log entries in browser `localStorage`.

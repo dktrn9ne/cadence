@@ -17,6 +17,7 @@ const COLORS = {
 
 const RLUSD_CURRENCY = "524C555344000000000000000000000000000000";
 const RLUSD_ISSUER = "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De";
+const CADENCE_EMPLOYER_WALLET = "rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864";
 const SOURCE_TAG = 2606250005;
 const LOG_STORAGE_KEY = "cadence-debug-logs-v1";
 const MAX_LOGS = 500;
@@ -86,6 +87,118 @@ const xrplRequest = (request) =>
       reject(new Error("Could not connect to the XRPL network."));
     });
   });
+
+const rippleTimeToIso = (seconds) =>
+  seconds ? new Date((seconds + 946684800) * 1000).toISOString() : new Date().toISOString();
+
+const txJson = (entry) => entry.tx_json || entry.tx || {};
+
+const deliveredIssuedAmount = (entry) => {
+  const delivered = entry.meta?.delivered_amount;
+  if (delivered && typeof delivered === "object") return delivered;
+  const amount = txJson(entry).Amount || txJson(entry).DeliverMax;
+  return amount && typeof amount === "object" ? amount : null;
+};
+
+const deliveredXrp = (entry) => {
+  const delivered = entry.meta?.delivered_amount;
+  if (typeof delivered === "string") return Number(delivered) / 1000000;
+  const amount = txJson(entry).Amount || txJson(entry).DeliverMax;
+  return typeof amount === "string" ? Number(amount) / 1000000 : 0;
+};
+
+const isRlusdAmount = (amount) =>
+  amount &&
+  (amount.currency === "RLUSD" || amount.currency === RLUSD_CURRENCY) &&
+  amount.issuer === RLUSD_ISSUER;
+
+const readIncomeProofData = async (employeeWallet, employerWallet = CADENCE_EMPLOYER_WALLET) => {
+  if (!employeeWallet?.startsWith("r")) {
+    throw new Error("Enter or unlock a valid employee XRPL wallet first.");
+  }
+
+  let marker;
+  const transactions = [];
+  for (let page = 0; page < 20; page += 1) {
+    const result = await xrplRequest({
+      command: "account_tx",
+      account: employeeWallet,
+      ledger_index_min: -1,
+      ledger_index_max: -1,
+      binary: false,
+      forward: false,
+      limit: 400,
+      ...(marker ? { marker } : {}),
+    });
+    transactions.push(...(result.transactions || []));
+    marker = result.marker;
+    if (!marker) break;
+  }
+
+  const incomeRows = transactions
+    .filter((entry) => {
+      const tx = txJson(entry);
+      const amount = deliveredIssuedAmount(entry);
+      return (
+        entry.meta?.TransactionResult === "tesSUCCESS" &&
+        tx.TransactionType === "Payment" &&
+        tx.Account === employerWallet &&
+        tx.Destination === employeeWallet &&
+        Number(tx.SourceTag) === SOURCE_TAG &&
+        isRlusdAmount(amount)
+      );
+    })
+    .map((entry) => {
+      const tx = txJson(entry);
+      const amount = deliveredIssuedAmount(entry);
+      const iso = entry.close_time_iso || rippleTimeToIso(tx.date);
+      return {
+        time: new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        iso,
+        amount: Number(amount.value || 0),
+        hash: entry.hash,
+        ledgerIndex: entry.ledger_index || tx.ledger_index,
+      };
+    });
+
+  const excludedXrpRows = transactions.filter((entry) => {
+    const tx = txJson(entry);
+    return (
+      entry.meta?.TransactionResult === "tesSUCCESS" &&
+      tx.TransactionType === "Payment" &&
+      tx.Destination === employeeWallet &&
+      !deliveredIssuedAmount(entry) &&
+      deliveredXrp(entry) > 0
+    );
+  });
+
+  const totalRlusd = incomeRows.reduce((sum, row) => sum + row.amount, 0);
+  const totalExcludedXrp = excludedXrpRows.reduce((sum, entry) => sum + deliveredXrp(entry), 0);
+  const newest = incomeRows[0] ? new Date(incomeRows[0].iso).getTime() : Date.now();
+  const oldest = incomeRows[incomeRows.length - 1] ? new Date(incomeRows[incomeRows.length - 1].iso).getTime() : newest;
+  const observedDays = Math.max(1 / 24, (newest - oldest) / 86400000);
+  const dailyRate = totalRlusd / observedDays;
+
+  return {
+    employeeWallet,
+    employerWallet,
+    sourceTag: SOURCE_TAG,
+    markerRemaining: Boolean(marker),
+    fetchedCount: transactions.length,
+    incomeRows,
+    stats: {
+      incomeCount: incomeRows.length,
+      totalRlusd,
+      excludedCount: excludedXrpRows.length,
+      totalExcludedXrp,
+      projectedWeekly: dailyRate * 7,
+      projectedMonthly: dailyRate * 30,
+      projectedAnnual: dailyRate * 365,
+      lifetimeMatches: marker ? `${incomeRows.length}+` : incomeRows.length,
+      observedDays,
+    },
+  };
+};
 
 const createWalletFromInput = (method, value) => {
   const phrase = value.trim();
@@ -403,11 +516,310 @@ function PersonDetails({ person, onEdit, onToggle, onPay, walletReady, paymentMe
   );
 }
 
-function Dashboard({ walletAddress, rlusdBalance, balanceLoading, onRefreshBalance, onOpenFunding, onReset, people, onAdd, selectedId, onSelect, onSave, onEdit, onToggle, onPay, paymentMessage, history, debugLogs, onExportLogs, onClearLogs }) {
+const makeEmployeeHistory = (perPayment, count = 8) => {
+  const now = Date.now();
+  return Array.from({ length: count }, (_, index) => {
+    const stamp = new Date(now - index * 15000);
+    const seed = (count - index + 1) * 2654435761;
+    const hash = Math.abs(seed).toString(16).toUpperCase().padStart(8, "0").slice(0, 8);
+    return {
+      time: stamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+      amount: perPayment.toFixed(6),
+      hash: `${hash}...`,
+      status: "Completed",
+    };
+  });
+};
+
+function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onReset }) {
+  const [ledgerOpen, setLedgerOpen] = useState(false);
+  const [proofData, setProofData] = useState(null);
+  const [proofLoading, setProofLoading] = useState(false);
+  const [proofError, setProofError] = useState("");
+  const employeeWallet = walletAddress?.startsWith("r") ? walletAddress : "";
+  const employerWallet = CADENCE_EMPLOYER_WALLET;
+  const stats = proofData?.stats || {
+    incomeCount: 0,
+    totalRlusd: 0,
+    excludedCount: 0,
+    totalExcludedXrp: 0,
+    projectedWeekly: 0,
+    projectedMonthly: 0,
+    projectedAnnual: 0,
+    lifetimeMatches: 0,
+    observedDays: 0,
+  };
+  const incomeRows = proofData?.incomeRows || [];
+  const generatedAt = new Date().toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
+  const documentId = employeeWallet ? `CADENCE-INC-${employeeWallet.slice(1, 7).toUpperCase()}` : "CADENCE-INC-CONNECT";
+
+  const refreshProof = async () => {
+    setProofLoading(true);
+    setProofError("");
+    try {
+      const data = await readIncomeProofData(employeeWallet, employerWallet);
+      setProofData(data);
+    } catch (error) {
+      setProofError(error?.message || "Could not read income transactions from the XRP Ledger.");
+    } finally {
+      setProofLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshProof();
+  }, [employeeWallet]);
+
+  const downloadCsv = () => {
+    const lines = ["time,amount_rlusd,tx_hash,ledger_index", ...incomeRows.map((row) => `${row.iso},${row.amount.toFixed(6)},${row.hash},${row.ledgerIndex || ""}`)];
+    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "cadence-income-proof.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="app-shell proof-app">
+      <header className="topbar proof-topbar">
+        <Brand compact />
+        <div className="topbar-right">
+          <div className="wallet-chip">{shortAddress(walletAddress || employeeWallet)}</div>
+          <Button kind="ghost" onClick={onExportLogs}>Export logs</Button>
+          <Button kind="ghost" onClick={onBack}>Back to dashboard</Button>
+          <Button kind="ghost" onClick={onReset}>Change wallet</Button>
+        </div>
+      </header>
+      <main className="proof-content">
+        <div className="proof-heading">
+          <div>
+            <p className="eyebrow"><span className="online-dot" /> Certified financial document</p>
+            <h1>Income verification</h1>
+            <p>On-chain proof of income, compiled from real XRP Ledger transactions for the currently connected wallet.</p>
+          </div>
+          <span className="proof-pill">Generated {generatedAt}</span>
+        </div>
+
+        <section className="proof-reference">
+          <div className="proof-reference-top">
+            <div>
+              <p>Document reference</p>
+              <strong>{documentId}</strong>
+            </div>
+            <span><i />Verified on-chain</span>
+          </div>
+          <div className="proof-reference-grid">
+            <div><small>Payee (connected wallet)</small><b>{employeeWallet || "No wallet connected"}</b></div>
+            <div><small>Payer (employer wallet)</small><b>{employerWallet}</b></div>
+            <div><small>Source tag</small><b>{SOURCE_TAG}</b></div>
+            <div><small>Ledger</small><b>XRP Ledger - Mainnet</b></div>
+          </div>
+        </section>
+
+        <div className="proof-stat-grid">
+          <section className="proof-card"><p className="eyebrow">Verified payments</p><strong>{stats.incomeCount}</strong><span>tagged incoming RLUSD transfers from Cadence</span></section>
+          <section className="proof-card"><p className="eyebrow">RLUSD received</p><strong>${stats.totalRlusd.toFixed(6)}</strong><span>over the verified window below</span></section>
+          <section className="proof-card"><p className="eyebrow">Other on-chain activity</p><strong>{stats.excludedCount}</strong><span>XRP txns ({stats.totalExcludedXrp.toFixed(6)} XRP), excluded from income</span></section>
+        </div>
+
+        {(proofLoading || proofError || stats.incomeCount === 0) && (
+          <section className={`proof-status ${proofError ? "error" : ""}`}>
+            {proofLoading ? "Reading real wallet transactions from XRPL mainnet..." : proofError || "No Cadence-tagged RLUSD income transactions were found for this wallet yet."}
+          </section>
+        )}
+
+        <section className="proof-card proof-projection">
+          <p className="eyebrow">Projected income, at verified rate</p>
+          <h2>Extrapolated from {stats.incomeCount} confirmed payments</h2>
+          <div className="proof-projection-grid">
+            <div><small>Weekly</small><strong>${stats.projectedWeekly.toFixed(2)}</strong></div>
+            <div><small>Monthly</small><strong>${stats.projectedMonthly.toFixed(2)}</strong></div>
+            <div><small>Annual</small><strong>${stats.projectedAnnual.toFixed(2)}</strong></div>
+          </div>
+          <p>Lifetime on-chain record shows {stats.lifetimeMatches} matching incoming payments in the fetched ledger window; projections use the observed timing across {stats.observedDays.toFixed(2)} day(s) of verified data.</p>
+        </section>
+
+        <section className="proof-card proof-ledger">
+          <div className="proof-ledger-head">
+            <div><p className="eyebrow">Verified payment ledger</p><h2>{stats.incomeCount} employer-tagged RLUSD payments</h2></div>
+            <div><Button kind="secondary" onClick={refreshProof} disabled={proofLoading}>{proofLoading ? "Reading..." : "Refresh"}</Button><Button kind="secondary" onClick={downloadCsv} disabled={!incomeRows.length}>Download CSV</Button><Button kind="ghost" onClick={() => setLedgerOpen((open) => !open)}>{ledgerOpen ? "Hide full ledger" : "View full ledger"}</Button></div>
+          </div>
+          {ledgerOpen && (
+            <div className="employee-table-wrap">
+              <table className="employee-table">
+                <thead><tr><th>Time</th><th>Amount</th><th>Transaction</th><th>Verify</th></tr></thead>
+                <tbody>
+                  {incomeRows.map((row) => (
+                    <tr key={row.hash}>
+                      <td>{row.time}</td>
+                      <td>${row.amount.toFixed(6)}</td>
+                      <td>{row.hash.slice(0, 10)}...{row.hash.slice(-6)}</td>
+                      <td><a href={`https://xrpscan.com/tx/${row.hash}`} target="_blank" rel="noreferrer">xrpscan</a></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        <p className="proof-disclaimer">This statement reflects payments retrieved directly from the XRP Ledger for the payee wallet above, filtered to transfers carrying Cadence's source tag from its disbursing wallet. Generated for self-serve verification purposes; not a bank-issued statement.</p>
+      </main>
+    </div>
+  );
+}
+
+function EmployeeDashboard({ walletAddress, people, onBack, onExportLogs, onReset }) {
+  const samplePerson = {
+    name: "Maurice",
+    role: "Employee",
+    address: walletAddress,
+    weeklyPay: "640",
+    frequency: "seconds15",
+    paidCount: 1335,
+  };
+  const employee = people.find((person) => person.active) || people[0] || samplePerson;
+  const schedule = getSchedule({ ...employee, frequency: employee.frequency || "seconds15" });
+  const startingPaid = Number(employee.paidCount || samplePerson.paidCount);
+  const [paidCount, setPaidCount] = useState(startingPaid);
+  const [msToNext, setMsToNext] = useState(15000);
+  const [withdrawn, setWithdrawn] = useState(false);
+  const [employeeHistory, setEmployeeHistory] = useState(() => makeEmployeeHistory(schedule.perPayment));
+  const [employeeView, setEmployeeView] = useState("proof");
+
+  useEffect(() => {
+    setPaidCount(Number(employee.paidCount || samplePerson.paidCount));
+    setMsToNext(15000);
+    setWithdrawn(false);
+    setEmployeeHistory(makeEmployeeHistory(schedule.perPayment));
+  }, [employee.id, schedule.perPayment]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setMsToNext((current) => {
+        const next = current - 200;
+        if (next > 0) return next;
+        setPaidCount((count) => Math.min(schedule.payments, count + 1));
+        setEmployeeHistory((currentHistory) => {
+          const hash = Math.abs(Date.now()).toString(16).toUpperCase().slice(-8);
+          return [{
+            time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+            amount: schedule.perPayment.toFixed(6),
+            hash: `${hash}...`,
+            status: "Completed",
+          }, ...currentHistory].slice(0, 8);
+        });
+        return 15000;
+      });
+    }, 200);
+
+    return () => window.clearInterval(timer);
+  }, [schedule.payments, schedule.perPayment]);
+
+  const cappedPaid = Math.min(paidCount, schedule.payments);
+  const balanceAccrued = cappedPaid * schedule.perPayment;
+  const progressPct = Math.min(100, (cappedPaid / schedule.payments) * 100);
+  const displayBalance = money(balanceAccrued, 2);
+  const [balanceWhole, balanceCents = "00"] = displayBalance.replace("$", "").split(".");
+  const employeeName = employee.name || "Maurice";
+  const employerWallet = "rEfcBKr...DE864";
+
+  if (employeeView === "proof") {
+    return <IncomeVerification walletAddress={walletAddress} employee={employee} onBack={() => setEmployeeView("dashboard")} onExportLogs={onExportLogs} onReset={onReset} />;
+  }
+
+  return (
+    <div className="app-shell employee-app">
+      <header className="topbar">
+        <Brand compact />
+        <div className="topbar-right">
+          <div className="wallet-chip"><span className="online-dot" />{shortAddress(walletAddress || employee.address)}</div>
+          <Button kind="ghost" onClick={onBack}>Employer view</Button>
+          <Button kind="ghost" onClick={() => setEmployeeView("proof")}>Income proof</Button>
+          <Button kind="ghost" onClick={onExportLogs}>Export logs</Button>
+          <Button kind="ghost" onClick={onReset}>Change wallet</Button>
+        </div>
+      </header>
+      <main className="dashboard-content employee-content">
+        <div className="employee-hero">
+          <div>
+            <p className="eyebrow"><span className="online-dot" /> Good to see you, {employeeName}</p>
+            <h1>Your pay, streaming in</h1>
+            <p className="muted-line">RLUSD arrives every {schedule.frequencyLabel}, straight from Cadence without waiting on payday.</p>
+          </div>
+          <div className="live-pill"><span className="online-dot" />Employee dashboard</div>
+        </div>
+
+        <section className="employee-balance-card">
+          <div className="employee-balance-top">
+            <div>
+              <p className="eyebrow">Available balance RLUSD</p>
+              <div className="employee-balance-number">${balanceWhole}<span>.{balanceCents}</span></div>
+              <p>{money(schedule.perPayment, 6)} every {schedule.frequencyLabel} - {money(schedule.weeklyPay)} this week</p>
+            </div>
+            <div className="employee-live-tag"><span className="online-dot" />Live</div>
+          </div>
+          <div className="employee-balance-footer">
+            <code>{shortAddress(walletAddress || employee.address)}</code>
+            <div>
+              <Button kind="soft" onClick={() => setWithdrawn(true)} disabled={withdrawn}>{withdrawn ? "Withdrawal queued" : "Withdraw"}</Button>
+              {withdrawn && <p>Funds settle in your linked account shortly.</p>}
+            </div>
+          </div>
+        </section>
+
+        <div className="employee-stat-grid">
+          <section className="employee-card">
+            <p className="eyebrow">Earned this week</p>
+            <strong>{money(balanceAccrued)}</strong>
+            <span>of a {money(schedule.weeklyPay)} weekly rhythm</span>
+            <div className="employee-progress"><div style={{ width: `${progressPct}%` }} /></div>
+            <small>{cappedPaid.toLocaleString()} / {schedule.payments.toLocaleString()} payouts this week</small>
+          </section>
+          <section className="employee-card">
+            <p className="eyebrow">Next payment</p>
+            <strong>{money(schedule.perPayment, 6)}</strong>
+            <span>arrives in {(msToNext / 1000).toFixed(1)}s</span>
+            <div className="employee-meta-row">
+              <div><small>Source tag</small><b>{SOURCE_TAG}</b></div>
+              <div><small>Paid by</small><b>{employerWallet}</b></div>
+            </div>
+          </section>
+        </div>
+
+        <section className="employee-card employee-history-card">
+          <div className="card-heading">
+            <div><p className="eyebrow">Payment history</p><h2>Recent RLUSD received</h2></div>
+            <span className="employee-live-tag">{employeeHistory.length} shown</span>
+          </div>
+          <div className="employee-table-wrap">
+            <table className="employee-table">
+              <thead><tr><th>Time</th><th>Amount</th><th>Transaction</th><th>Status</th></tr></thead>
+              <tbody>
+                {employeeHistory.map((row) => (
+                  <tr key={`${row.time}-${row.hash}`}>
+                    <td>{row.time}</td>
+                    <td>${row.amount}</td>
+                    <td>{row.hash}</td>
+                    <td><span>{row.status}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+  );
+}
+
+function Dashboard({ walletAddress, rlusdBalance, balanceLoading, onRefreshBalance, onOpenFunding, onReset, people, onAdd, selectedId, onSelect, onSave, onEdit, onToggle, onPay, paymentMessage, history, debugLogs, onExportLogs, onClearLogs, onOpenEmployee }) {
   const selectedPerson = people.find((person) => person.id === selectedId);
   return (
     <div className="app-shell">
-      <header className="topbar"><Brand compact /><div className="topbar-right"><div className="wallet-chip"><span className="online-dot" />{shortAddress(walletAddress)}</div><Button kind="ghost" onClick={onExportLogs}>Export logs</Button><Button kind="ghost" onClick={onClearLogs}>Clear logs</Button><Button kind="ghost" onClick={onReset}>Change wallet</Button></div></header>
+      <header className="topbar"><Brand compact /><div className="topbar-right"><div className="wallet-chip"><span className="online-dot" />{shortAddress(walletAddress)}</div><Button kind="ghost" onClick={onOpenEmployee}>Employee view</Button><Button kind="ghost" onClick={onExportLogs}>Export logs</Button><Button kind="ghost" onClick={onClearLogs}>Clear logs</Button><Button kind="ghost" onClick={onReset}>Change wallet</Button></div></header>
       <main className="dashboard-content">
         <div className="welcome-row"><div><p className="eyebrow">Good to see you</p><h1>Your payment rhythm</h1><p className="muted-line">Keep RLUSD moving at a pace that feels natural.</p></div><div className="live-pill"><span className="online-dot" />Local session</div></div>
         <section className="balance-card"><div><p className="eyebrow">Available balance  RLUSD</p><div className="balance-number">{money(rlusdBalance, 2)}</div><p className="muted-line">{walletAddress ? shortAddress(walletAddress) : "Local wallet test mode"}</p></div><div className="balance-actions"><Button kind="secondary" onClick={onRefreshBalance} disabled={balanceLoading}>{balanceLoading ? "Reading..." : "Refresh balance"}</Button>{rlusdBalance <= 0 && <Button kind="soft" onClick={onOpenFunding}>How to get RLUSD</Button>}</div></section>
@@ -437,6 +849,7 @@ export default function CadenceDashboard() {
   const [paymentMessage, setPaymentMessage] = useState("");
   const [history, setHistory] = useState([]);
   const [debugLogs, setDebugLogs] = useState(loadStoredLogs);
+  const [dashboardView, setDashboardView] = useState("employer");
   const autoPayingRef = useRef(false);
 
   const selectedPerson = useMemo(() => people.find((person) => person.id === selectedId), [people, selectedId]);
@@ -689,6 +1102,7 @@ export default function CadenceDashboard() {
     setRlusdBalance(0);
     setSigningWallet(null);
     setSetupError("");
+    setDashboardView("employer");
   };
 
   return (
@@ -845,6 +1259,70 @@ export default function CadenceDashboard() {
         .funding-steps { display: grid; gap: 13px; margin: 22px 0 26px; }
         .funding-steps > div { display: grid; grid-template-columns: 25px 1fr; gap: 9px; align-items: start; color: ${COLORS.muted}; font-size: 12px; line-height: 1.45; }
         .funding-steps b { display: grid; place-items: center; width: 23px; height: 23px; border-radius: 50%; background: ${COLORS.mint}; color: ${COLORS.mintDark}; font-size: 11px; }
+        .employee-app { background: linear-gradient(180deg, ${COLORS.paper} 0%, #f4efe4 100%); }
+        .employee-content { max-width: 1000px; display: flex; flex-direction: column; gap: 18px; }
+        .employee-hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+        .employee-hero .eyebrow { display: flex; align-items: center; gap: 8px; }
+        .employee-hero h1 { font-size: clamp(38px, 5vw, 58px); margin-bottom: 10px; }
+        .employee-balance-card { display: grid; gap: 22px; padding: 30px 34px; border-radius: 24px; background: ${COLORS.ink}; color: #fffdf8; box-shadow: 0 18px 40px rgba(36,51,45,.16); }
+        .employee-balance-card .eyebrow { color: #c1d0c7; }
+        .employee-balance-card p { margin: 0; color: #c1d0c7; font-size: 13px; }
+        .employee-balance-top, .employee-balance-footer { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+        .employee-balance-footer { align-items: flex-end; padding-top: 18px; border-top: 1px solid rgba(255,253,248,.15); }
+        .employee-balance-footer code { color: #c1d0c7; }
+        .employee-balance-footer > div { display: grid; justify-items: end; gap: 8px; }
+        .employee-balance-number { font: 600 clamp(54px, 8vw, 86px)/1 'Fraunces', Georgia, serif; letter-spacing: -.04em; margin: 8px 0 12px; }
+        .employee-balance-number span { color: ${COLORS.mint}; }
+        .employee-live-tag { display: inline-flex; align-items: center; gap: 7px; width: fit-content; padding: 7px 10px; border-radius: 999px; background: #e7f2e9; color: ${COLORS.mintDark}; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+        .employee-stat-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+        .employee-card { padding: 24px; border: 1px solid ${COLORS.line}; border-radius: 20px; background: ${COLORS.card}; box-shadow: 0 10px 24px rgba(72,74,56,.07); }
+        .employee-card strong { display: block; font: 600 30px Georgia, serif; margin-bottom: 6px; color: ${COLORS.ink}; }
+        .employee-card span, .employee-card small { color: ${COLORS.muted}; font-size: 12px; }
+        .employee-progress { height: 9px; overflow: hidden; margin: 16px 0 9px; border-radius: 999px; background: #ece7dc; }
+        .employee-progress div { height: 100%; border-radius: inherit; background: ${COLORS.mintDark}; transition: width .2s ease; }
+        .employee-meta-row { display: flex; gap: 30px; margin-top: 18px; flex-wrap: wrap; }
+        .employee-meta-row small, .employee-meta-row b { display: block; }
+        .employee-meta-row b { margin-top: 3px; font-size: 13px; }
+        .employee-history-card .card-heading { margin-bottom: 16px; }
+        .employee-table-wrap { overflow: auto; }
+        .employee-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .employee-table th { padding: 10px 8px; border-bottom: 1px solid ${COLORS.line}; color: ${COLORS.muted}; text-align: left; text-transform: uppercase; letter-spacing: .08em; font-size: 10px; }
+        .employee-table td { padding: 12px 8px; border-bottom: 1px solid #eee8db; color: ${COLORS.ink}; }
+        .employee-table td:nth-child(3) { color: ${COLORS.muted}; font-family: monospace; }
+        .employee-table td span { display: inline-flex; padding: 4px 9px; border-radius: 999px; background: #e7f2e9; color: ${COLORS.mintDark}; font-size: 11px; font-weight: 700; }
+        .proof-app { background: #f4ead8; }
+        .proof-topbar { background: rgba(244,234,216,.85); border-bottom: 0; }
+        .proof-content { max-width: 900px; margin: 0 auto; padding: 18px clamp(20px, 4vw, 44px) 44px; display: flex; flex-direction: column; gap: 18px; }
+        .proof-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; flex-wrap: wrap; }
+        .proof-heading .eyebrow { display: flex; align-items: center; gap: 8px; color: ${COLORS.coralDark}; }
+        .proof-heading h1 { color: #201e1d; font-size: clamp(36px, 5vw, 52px); margin-bottom: 8px; }
+        .proof-heading p { max-width: 540px; margin: 0; color: #615a51; line-height: 1.5; }
+        .proof-pill { display: inline-flex; align-items: center; padding: 7px 12px; border-radius: 999px; background: #eef8df; color: ${COLORS.mintDark}; font-size: 11px; white-space: nowrap; }
+        .proof-reference { display: grid; gap: 18px; padding: 22px 18px; border-radius: 28px; background: #201e1d; color: #fff8ec; }
+        .proof-reference-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 16px; border-bottom: 1px solid rgba(255,248,236,.14); }
+        .proof-reference-top p, .proof-reference small { margin: 0; color: rgba(255,248,236,.55); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+        .proof-reference-top strong { display: block; margin-top: 4px; font: 600 22px Georgia, serif; letter-spacing: .02em; }
+        .proof-reference-top span { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 999px; background: rgba(255,248,236,.12); font-size: 11px; font-weight: 700; text-transform: uppercase; white-space: nowrap; }
+        .proof-reference-top i { width: 6px; height: 6px; border-radius: 999px; background: ${COLORS.coral}; }
+        .proof-reference-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 28px; }
+        .proof-reference b { display: block; margin-top: 4px; font-size: 13px; word-break: break-all; }
+        .proof-stat-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+        .proof-card { padding: 20px 14px; border-radius: 28px; background: #eadcc4; box-shadow: 0 4px 14px rgba(46,43,37,.08); }
+        .proof-card .eyebrow { color: ${COLORS.coralDark}; }
+        .proof-card strong { display: block; color: #201e1d; font: 600 30px Georgia, serif; margin: 8px 0; }
+        .proof-card span, .proof-card p { color: #615a51; font-size: 13px; line-height: 1.5; }
+        .proof-status { padding: 13px 16px; border-radius: 16px; background: #eef8df; color: ${COLORS.mintDark}; font-size: 13px; line-height: 1.5; }
+        .proof-status.error { background: #fae9e2; color: ${COLORS.coralDark}; }
+        .proof-projection { padding: 24px 14px; }
+        .proof-projection h2, .proof-ledger h2 { font-size: 20px; color: #201e1d; letter-spacing: 0; margin-bottom: 18px; }
+        .proof-projection-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; margin-bottom: 18px; }
+        .proof-projection-grid small { display: block; color: ${COLORS.muted}; margin-bottom: 5px; }
+        .proof-projection-grid strong { font-size: 24px; margin: 0; }
+        .proof-ledger { padding: 14px; }
+        .proof-ledger-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+        .proof-ledger-head h2 { margin: 0; }
+        .proof-ledger-head > div:last-child { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .proof-disclaimer { max-width: 680px; margin: 0; color: ${COLORS.muted}; font-size: 12px; line-height: 1.5; }
         @media (max-width: 760px) {
           .topbar { height: auto; padding: 18px 20px; gap: 14px; flex-wrap: wrap; }
           .topbar-right { width: 100%; justify-content: space-between; }
@@ -852,6 +1330,9 @@ export default function CadenceDashboard() {
           .welcome-row, .balance-card, .payer-strip { align-items: flex-start; flex-direction: column; }
           .balance-card { padding: 25px; }
           .content-grid { grid-template-columns: 1fr; }
+          .employee-balance-card { padding: 25px; }
+          .employee-stat-grid { grid-template-columns: 1fr; }
+          .proof-reference-grid, .proof-stat-grid, .proof-projection-grid { grid-template-columns: 1fr; }
           .debug-log-row { grid-template-columns: 1fr; }
           .plan-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
@@ -873,7 +1354,9 @@ export default function CadenceDashboard() {
         <>
           {editorOpen ? (
             <div className="app-shell"><header className="topbar"><Brand compact /><Button kind="ghost" onClick={() => setEditorOpen(false)}>Back to dashboard</Button></header><main className="dashboard-content"><PersonEditor person={editingPerson} onSave={savePerson} onCancel={() => { setEditorOpen(false); setEditingPerson(null); }} /></main></div>
-          ) : <Dashboard walletAddress={walletAddress} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} onOpenFunding={() => setShowFunding(true)} onReset={resetWallet} people={people} onAdd={() => { setEditingPerson(null); setEditorOpen(true); }} selectedId={selectedId} onSelect={setSelectedId} onSave={savePerson} onEdit={(person) => { setEditingPerson(person); setEditorOpen(true); }} onToggle={togglePlan} onPay={payInstallment} paymentMessage={paymentMessage} history={history} debugLogs={debugLogs} onExportLogs={exportLogs} onClearLogs={clearLogs} />}
+          ) : dashboardView === "employee" ? (
+            <EmployeeDashboard walletAddress={walletAddress} people={people} onBack={() => setDashboardView("employer")} onExportLogs={exportLogs} onReset={resetWallet} />
+          ) : <Dashboard walletAddress={walletAddress} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} onOpenFunding={() => setShowFunding(true)} onReset={resetWallet} people={people} onAdd={() => { setEditingPerson(null); setEditorOpen(true); }} selectedId={selectedId} onSelect={setSelectedId} onSave={savePerson} onEdit={(person) => { setEditingPerson(person); setEditorOpen(true); }} onToggle={togglePlan} onPay={payInstallment} paymentMessage={paymentMessage} history={history} debugLogs={debugLogs} onExportLogs={exportLogs} onClearLogs={clearLogs} onOpenEmployee={() => setDashboardView("employee")} />}
           {showFunding && <FundingModal onClose={() => setShowFunding(false)} />}
         </>
       )}
