@@ -587,7 +587,7 @@ function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onR
   const [proofData, setProofData] = useState(null);
   const [proofLoading, setProofLoading] = useState(false);
   const [proofError, setProofError] = useState("");
-  const employeeWallet = walletAddress?.startsWith("r") ? walletAddress : "";
+  const connectedWallet = walletAddress?.startsWith("r") ? walletAddress : "";
   const employerWallet = CADENCE_EMPLOYER_WALLET;
   const stats = proofData?.stats || {
     incomeCount: 0,
@@ -602,13 +602,13 @@ function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onR
   };
   const incomeRows = proofData?.incomeRows || [];
   const generatedAt = new Date().toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
-  const documentId = employeeWallet ? `CADENCE-INC-${employeeWallet.slice(1, 7).toUpperCase()}` : "CADENCE-INC-CONNECT";
+  const documentId = connectedWallet ? `CADENCE-INC-${connectedWallet.slice(0, 6).toUpperCase()}-${connectedWallet.slice(-6).toUpperCase()}` : "CADENCE-INC-CONNECT";
 
   const refreshProof = async () => {
     setProofLoading(true);
     setProofError("");
     try {
-      const data = await readIncomeProofData(employeeWallet, employerWallet);
+      const data = await readIncomeProofData(connectedWallet, employerWallet);
       setProofData(data);
     } catch (error) {
       setProofError(error?.message || "Could not read income transactions from the XRP Ledger.");
@@ -618,8 +618,9 @@ function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onR
   };
 
   useEffect(() => {
+    setProofData(null);
     refreshProof();
-  }, [employeeWallet]);
+  }, [connectedWallet]);
 
   const downloadCsv = () => {
     const lines = ["time,amount_rlusd,tx_hash,ledger_index", ...incomeRows.map((row) => `${row.iso},${row.amount.toFixed(6)},${row.hash},${row.ledgerIndex || ""}`)];
@@ -637,7 +638,7 @@ function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onR
       <header className="topbar proof-topbar">
         <Brand compact />
         <div className="topbar-right">
-          <div className="wallet-chip">{shortAddress(walletAddress || employeeWallet)}</div>
+          <div className="wallet-chip"><span className="online-dot" />Connected wallet {shortAddress(connectedWallet)}</div>
           <Button kind="ghost" onClick={onExportLogs}>Export logs</Button>
           <Button kind="ghost" onClick={onBack}>Back to dashboard</Button>
           <Button kind="ghost" onClick={onReset}>Change wallet</Button>
@@ -662,7 +663,7 @@ function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onR
             <span><i />Verified on-chain</span>
           </div>
           <div className="proof-reference-grid">
-            <div><small>Payee (connected wallet)</small><b>{employeeWallet || "No wallet connected"}</b></div>
+            <div><small>Connected wallet / payee</small><b>{connectedWallet || "No wallet connected"}</b></div>
             <div><small>Payer (employer wallet)</small><b>{employerWallet}</b></div>
             <div><small>Source tag</small><b>{SOURCE_TAG}</b></div>
             <div><small>Ledger</small><b>XRP Ledger - Mainnet</b></div>
@@ -702,8 +703,8 @@ function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onR
               <table className="employee-table">
                 <thead><tr><th>Time</th><th>Amount</th><th>Transaction</th><th>Verify</th></tr></thead>
                 <tbody>
-                  {incomeRows.map((row) => (
-                    <tr key={row.hash}>
+                  {incomeRows.map((row, index) => (
+                    <tr key={`${row.hash}-${row.ledgerIndex || index}`}>
                       <td>{row.time}</td>
                       <td>${row.amount.toFixed(6)}</td>
                       <td>{row.hash.slice(0, 10)}...{row.hash.slice(-6)}</td>
@@ -849,8 +850,8 @@ function EmployeeDashboard({ walletAddress, people, onBack, onExportLogs, onRese
             <table className="employee-table">
               <thead><tr><th>Time</th><th>Amount</th><th>Transaction</th><th>Status</th></tr></thead>
               <tbody>
-                {employeeHistory.map((row) => (
-                  <tr key={`${row.time}-${row.hash}`}>
+                {employeeHistory.map((row, index) => (
+                  <tr key={`${row.time}-${row.hash}-${index}`}>
                     <td>{row.time}</td>
                     <td>${row.amount}</td>
                     <td>{row.hash}</td>
@@ -876,7 +877,7 @@ function Dashboard({ walletAddress, rlusdBalance, balanceLoading, onRefreshBalan
         <section className="balance-card"><div><p className="eyebrow">Available balance  RLUSD</p><div className="balance-number">{money(rlusdBalance, 2)}</div><p className="muted-line">{walletAddress ? shortAddress(walletAddress) : "Local wallet test mode"}</p></div><div className="balance-actions"><Button kind="secondary" onClick={onRefreshBalance} disabled={balanceLoading}>{balanceLoading ? "Reading..." : "Refresh balance"}</Button>{rlusdBalance <= 0 && <Button kind="soft" onClick={onOpenFunding}>How to get RLUSD</Button>}</div></section>
         <section className="payer-strip"><div><p className="eyebrow">Payment wallet</p><strong>{shortAddress(walletAddress)}</strong><span>Payments are signed locally from the wallet phrase you unlocked.</span></div><Button kind="secondary" onClick={onReset}>Change wallet</Button></section>
         <div className="content-grid"><PeopleList people={people} selectedId={selectedId} onSelect={onSelect} onAdd={onAdd} />{selectedPerson ? <PersonDetails person={selectedPerson} onEdit={() => onEdit(selectedPerson)} onToggle={() => onToggle(selectedPerson.id)} onPay={() => onPay(selectedPerson)} walletReady={Boolean(walletAddress && walletAddress.startsWith("r"))} paymentMessage={paymentMessage} /> : <div className="details-card details-empty"><div className="empty-sun">*</div><h2>Your next step is small.</h2><p>Add a person and Cadence will turn their total pay into clear, simple installments.</p><Button onClick={onAdd}>Create a payment plan</Button></div>}</div>
-        <section className="history-panel"><div className="card-heading"><div><p className="eyebrow">Diagnostics</p><h2>Debug logs</h2></div><Button kind="small" onClick={onExportLogs}>Export logs</Button></div>{debugLogs.length === 0 ? <p className="muted-line">No diagnostic logs yet.</p> : <div className="debug-log-list">{debugLogs.slice(0, 12).map((item) => <div className="debug-log-row" key={item.id}><time>{new Date(item.at).toLocaleString()}</time><b>{item.event}</b><code>{JSON.stringify(item.payload)}</code></div>)}</div>}</section>
+        <section className="history-panel"><div className="card-heading"><div><p className="eyebrow">Diagnostics</p><h2>Debug logs</h2></div><Button kind="small" onClick={onExportLogs}>Export logs</Button></div>{debugLogs.length === 0 ? <p className="muted-line">No diagnostic logs yet.</p> : <div className="debug-log-list">{debugLogs.slice(0, 12).map((item, index) => <div className="debug-log-row" key={`${item.id}-${index}`}><time>{new Date(item.at).toLocaleString()}</time><b>{item.event}</b><code>{JSON.stringify(item.payload)}</code></div>)}</div>}</section>
         <p className="footer-note">RLUSD is a dollar-denominated token on the XRP Ledger. Network fees, issuer details, and wallet confirmations should always be checked before sending.</p>
       </main>
     </div>
