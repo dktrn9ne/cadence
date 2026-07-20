@@ -23,8 +23,9 @@ const LOG_STORAGE_KEY = "cadence-debug-logs-v1";
 const MAX_LOGS = 500;
 
 const ACCESS_METHODS = [
+  { value: "auto", label: "Auto-detect wallet secret", hint: "Family seed or BIP39 phrase" },
   { value: "family", label: "XRPL family seed", hint: "Usually starts with s" },
-  { value: "mnemonic", label: "Mnemonic seed phrase", hint: "12 or 24 words" },
+  { value: "mnemonic", label: "BIP39 mnemonic phrase", hint: "12, 15, 18, 21, or 24 words" },
 ];
 
 const TIME_UNITS = {
@@ -200,17 +201,46 @@ const readIncomeProofData = async (employeeWallet, employerWallet = CADENCE_EMPL
   };
 };
 
+const normalizeMnemonic = (value) => value.trim().toLowerCase().replace(/\s+/g, " ");
+
+const isLikelyFamilySeed = (value) => {
+  const phrase = value.trim();
+  return /^s[1-9A-HJ-NP-Za-km-z]{20,}$/.test(phrase) && !/\s/.test(phrase);
+};
+
 const createWalletFromInput = (method, value) => {
   const phrase = value.trim();
   if (!phrase) {
     throw new Error("Enter your wallet phrase to continue.");
   }
 
-  if (method === "family") {
-    return Wallet.fromSeed(phrase);
+  const selectedMethod = method === "auto"
+    ? isLikelyFamilySeed(phrase) ? "family" : "mnemonic"
+    : method;
+
+  if (selectedMethod === "family") {
+    try {
+      return Wallet.fromSeed(phrase);
+    } catch {
+      throw new Error("That does not look like a valid XRPL family seed. XRPL family seeds usually start with s.");
+    }
   }
 
-  return Wallet.fromMnemonic(phrase);
+  if (isLikelyFamilySeed(phrase)) {
+    throw new Error("This looks like an XRPL family seed. Choose Auto-detect wallet secret or XRPL family seed instead of BIP39 mnemonic phrase.");
+  }
+
+  const normalizedMnemonic = normalizeMnemonic(phrase);
+  const wordCount = normalizedMnemonic.split(" ").filter(Boolean).length;
+  if (![12, 15, 18, 21, 24].includes(wordCount)) {
+    throw new Error("BIP39 mnemonic phrases are 12, 15, 18, 21, or 24 words. If your secret starts with s, use XRPL family seed.");
+  }
+
+  try {
+    return Wallet.fromMnemonic(normalizedMnemonic);
+  } catch {
+    throw new Error("Unable to parse this as a BIP39 mnemonic. Check the spelling and word order, or use XRPL family seed if your secret starts with s.");
+  }
 };
 
 const submitRlusdPayment = async ({ wallet, destination, amount }) => {
@@ -855,7 +885,7 @@ function Dashboard({ walletAddress, rlusdBalance, balanceLoading, onRefreshBalan
 
 export default function CadenceDashboard() {
   const [screen, setScreen] = useState("intro");
-  const [method, setMethod] = useState("family");
+  const [method, setMethod] = useState("auto");
   const [accessInput, setAccessInput] = useState("");
   const [walletAddress, setWalletAddress] = useState("");
   const [rlusdBalance, setRlusdBalance] = useState(0);

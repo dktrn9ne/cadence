@@ -33,7 +33,7 @@ The Electron app window will open. The Vite dev server is also available at `htt
 
 ## What This Version Does
 
-- Unlocks an XRPL wallet locally from either an XRPL family seed or mnemonic phrase.
+- Unlocks an XRPL wallet locally from either an XRPL family seed or BIP39 mnemonic phrase, with auto-detection on the opening screen.
 - Reads the unlocked wallet's RLUSD trustline balance from XRPL mainnet.
 - Lets you add people with names, roles, emails, destination XRPL addresses, and pay schedules.
 - Supports weekly pay or hourly pay converted into a weekly total.
@@ -73,8 +73,9 @@ This app can sign real XRPL mainnet transactions. Treat it carefully.
 1. Launch the desktop app with `npm run desktop:dev`.
 2. Click through the intro screen.
 3. Choose the wallet phrase type:
+   - `Auto-detect wallet secret` for the safest default.
    - `XRPL family seed` for a seed that usually starts with `s`.
-   - `Mnemonic seed phrase` for a 12- or 24-word phrase.
+   - `BIP39 mnemonic phrase` for a 12-, 15-, 18-, 21-, or 24-word phrase.
 4. Enter the wallet phrase to unlock the local signing wallet.
 5. Let Cadence read the wallet's RLUSD balance.
 6. Add a person with a destination XRPL address.
@@ -101,6 +102,8 @@ C:\Users\<you>\AppData\Roaming\Electron\cadence-renderer.log
 ```
 
 Common harmless development messages include Vite startup logs, the React DevTools suggestion, and Electron's development Content Security Policy warning.
+
+If you see a BIP39 mnemonic parsing error, the secret is either not a standard BIP39 phrase or it was entered under the wrong method. XRPL family seeds usually start with `s`; choose `Auto-detect wallet secret` or `XRPL family seed` for those.
 
 ## Project Structure
 
