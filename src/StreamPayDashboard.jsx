@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import crossmark from "@crossmarkio/sdk";
 import { Client, ECDSA, Wallet } from "xrpl";
 
 const COLORS = {
@@ -324,6 +325,57 @@ const buildRlusdPayment = ({ wallet, destination, amount }) => ({
   },
 });
 
+const buildCrossmarkRlusdPayment = ({ account, destination, amount }) =>
+  buildRlusdPayment({ wallet: { address: account }, destination, amount });
+
+const responseHash = (response) =>
+  response?.response?.data?.resp?.result?.hash ||
+  response?.response?.data?.result?.hash ||
+  response?.data?.resp?.result?.hash ||
+  response?.data?.result?.hash ||
+  response?.result?.hash ||
+  response?.hash ||
+  null;
+
+const connectCrossmarkWallet = async () => {
+  const detected = await crossmark.async.detect(2000);
+  if (!detected && !crossmark.sync.isInstalled?.()) {
+    throw new Error("Crossmark was not detected. Install or unlock Crossmark, then try again.");
+  }
+  await crossmark.async.connect(5000).catch(() => false);
+  const signIn = await crossmark.async.signInAndWait();
+  const address =
+    signIn?.response?.data?.address ||
+    signIn?.response?.data?.account ||
+    signIn?.data?.address ||
+    signIn?.data?.account ||
+    crossmark.sync.getAddress?.();
+  if (!address?.startsWith("r")) {
+    throw new Error("Crossmark did not return a valid XRPL address.");
+  }
+  return { address, signIn };
+};
+
+const submitCrossmarkRlusdPayment = async ({ account, destination, amount, feeAmount = "0" }) => {
+  const payment = buildCrossmarkRlusdPayment({ account, destination, amount });
+  const result = await crossmark.async.signAndSubmitAndWait(payment);
+  let fee = null;
+  let feeError = null;
+  if (Number(feeAmount) > 0 && destination !== CADENCE_TREASURY_WALLET) {
+    try {
+      const feePayment = buildCrossmarkRlusdPayment({
+        account,
+        destination: CADENCE_TREASURY_WALLET,
+        amount: feeAmount,
+      });
+      fee = await crossmark.async.signAndSubmitAndWait(feePayment);
+    } catch (error) {
+      feeError = error;
+    }
+  }
+  return { result, hash: responseHash(result), transaction: payment, fee, feeError };
+};
+
 const submitRlusdPayment = async ({ wallet, destination, amount, feeAmount = "0" }) => {
   const client = new Client("wss://s1.ripple.com");
   await client.connect();
@@ -477,7 +529,6 @@ function Field({ label, children, help }) {
 }
 
 function Intro({ method, setMethod, accessInput, setAccessInput, expectedAddress, setExpectedAddress, onSubmit, error }) {
-  const activeMethod = ACCESS_METHODS.find((item) => item.value === method);
   return (
     <div className="center-screen intro-screen">
       <div className="intro-decoration decoration-one" />
@@ -485,88 +536,16 @@ function Intro({ method, setMethod, accessInput, setAccessInput, expectedAddress
       <div className="intro-card">
         <Brand />
         <div className="intro-sun">*</div>
-        <p className="eyebrow">A gentler way to pay</p>
-        <h1>Make every payment<br /><em>feel effortless.</em></h1>
+        <p className="eyebrow">Connect with Crossmark</p>
+        <h1>Your wallet,<br /><em>exactly as selected.</em></h1>
         <p className="intro-copy">
-          Connect your XRPL wallet to read real RLUSD income, verify on-chain payments, and manage Cadence payment plans.
+          Cadence connects to the active Crossmark wallet, reads real RLUSD income, and sends payments for approval in Crossmark.
         </p>
         <div className="intro-connect-form">
-          <Field label="Wallet phrase method">
-            <select value={method} onChange={(event) => setMethod(event.target.value)}>
-              {ACCESS_METHODS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-            </select>
-          </Field>
-          <Field label={activeMethod.label} help={`${activeMethod.hint}. Used locally to unlock this session.`}>
-            <input
-              value={accessInput}
-              onChange={(event) => setAccessInput(event.target.value)}
-              type="password"
-              autoComplete="off"
-              placeholder={`Enter ${activeMethod.hint.toLowerCase()}`}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") onSubmit();
-              }}
-            />
-          </Field>
-          <Field label="Expected public wallet address" help="Recommended for filming. Cadence will only continue if the phrase unlocks this exact XRPL address.">
-            <input
-              value={expectedAddress}
-              onChange={(event) => setExpectedAddress(event.target.value)}
-              autoComplete="off"
-              placeholder="r..."
-              onKeyDown={(event) => {
-                if (event.key === "Enter") onSubmit();
-              }}
-            />
-          </Field>
           {error && <div className="error-message">{error}</div>}
-          <Button onClick={onSubmit}>Connect wallet <span>{">"}</span></Button>
+          <Button onClick={onSubmit}>Connect Crossmark <span>{">"}</span></Button>
         </div>
-        <div className="intro-note">Your phrase stays in memory for this session and is redacted from exported logs.</div>
-      </div>
-    </div>
-  );
-}
-
-function WalletSetup({ method, setMethod, accessInput, setAccessInput, expectedAddress, setExpectedAddress, onSubmit, error }) {
-  const activeMethod = ACCESS_METHODS.find((item) => item.value === method);
-  return (
-    <div className="center-screen setup-screen">
-      <div className="setup-card">
-        <Brand compact />
-        <div className="progress-dots"><span className="active" /><span /><span /></div>
-        <p className="eyebrow">Step one of three</p>
-        <h2>Unlock your wallet<br />for Cadence.</h2>
-        <p className="section-copy">
-          Cadence uses this phrase locally to derive your XRPL wallet and sign RLUSD payments on this computer.
-        </p>
-        <div className="form-stack">
-          <Field label="Wallet phrase method">
-            <select value={method} onChange={(event) => setMethod(event.target.value)}>
-              {ACCESS_METHODS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-            </select>
-          </Field>
-          <Field label={activeMethod.label} help={`${activeMethod.hint}. Never send this phrase in logs or chat.`}>
-            <input
-              value={accessInput}
-              onChange={(event) => setAccessInput(event.target.value)}
-              type="password"
-              autoComplete="off"
-              placeholder={`Enter ${activeMethod.hint.toLowerCase()}`}
-            />
-          </Field>
-          <Field label="Expected public wallet address" help="Cadence will verify that the secret unlocks this exact address before continuing.">
-            <input
-              value={expectedAddress}
-              onChange={(event) => setExpectedAddress(event.target.value)}
-              autoComplete="off"
-              placeholder="r..."
-            />
-          </Field>
-        </div>
-        {error && <div className="error-message">{error}</div>}
-        <Button onClick={onSubmit}>Unlock Cadence <span>{">"}</span></Button>
-        <div className="security-note"><span>*</span> Your phrase stays in memory for this session and is redacted from exported logs.</div>
+        <div className="intro-note">Cadence never asks for your seed phrase in the consumer flow. Crossmark signs each transaction request.</div>
       </div>
     </div>
   );
@@ -680,7 +659,7 @@ function PersonDetails({ person, onEdit, onToggle, onPay, walletReady, paymentMe
       <div className="detail-highlight"><div><span className="eyebrow">Weekly pay</span><strong>{money(schedule.weeklyPay)}</strong><small>recipient amount across 1 week</small></div><div className="highlight-arrow">+</div><div><span className="eyebrow">Each payout</span><strong>{money(schedule.perPayment, 6)}</strong><small>{money(schedule.streamFee, 6)} treasury fee</small></div></div>
       <div className="plan-meter"><div><span>Installments sent</span><strong>{paidCount} / {schedule.payments.toLocaleString()}</strong></div><div><span>Next send</span><strong>{nextRun}</strong></div><div><span>Total debit</span><strong>{money(schedule.totalPerPayment, 6)}</strong></div><div><span>Fee treasury</span><strong>{shortAddress(CADENCE_TREASURY_WALLET)}</strong></div><div><span>Source tag</span><strong>{SOURCE_TAG}</strong></div></div>
       <div className="details-actions"><Button kind={person.active ? "secondary" : "primary"} onClick={onToggle}>{person.active ? "Pause plan" : "Start plan"}</Button><Button kind="secondary" onClick={onPay} disabled={!walletReady || !person.address.startsWith("r")}>Pay one installment</Button></div>
-      {!walletReady && <p className="inline-note">Unlock your wallet phrase first to make an on-chain payment.</p>}
+      {!walletReady && <p className="inline-note">Connect Crossmark first to make an on-chain payment.</p>}
       {walletReady && !person.address.startsWith("r") && <p className="inline-note">Add a public XRPL destination address before paying.</p>}
       {paymentMessage && <div className="success-message">{paymentMessage}</div>}
       <div className="safe-payment-note"><span>?</span> Cadence sends the recipient payment plus a 1.5% RLUSD stream fee to the treasury wallet. Your wallet may ask you to confirm both on-chain payments.</div>
@@ -984,16 +963,17 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
   );
 }
 
-function Dashboard({ walletAddress, rlusdBalance, balanceLoading, onRefreshBalance, onOpenFunding, onReset, people, onAdd, selectedId, onSelect, onSave, onEdit, onToggle, onPay, paymentMessage, history, onExportLogs, onOpenEmployee }) {
+function Dashboard({ walletAddress, walletProvider, rlusdBalance, balanceLoading, onRefreshBalance, onOpenFunding, onReset, people, onAdd, selectedId, onSelect, onSave, onEdit, onToggle, onPay, paymentMessage, history, onExportLogs, onOpenEmployee }) {
   const selectedPerson = people.find((person) => person.id === selectedId);
+  const walletReady = Boolean(walletProvider === "crossmark" && walletAddress?.startsWith("r"));
   return (
     <div className="app-shell">
       <header className="topbar"><Brand compact /><div className="topbar-right"><div className="wallet-chip"><span className="online-dot" />{shortAddress(walletAddress)}</div><Button kind="ghost" onClick={onOpenEmployee}>Wallet dashboard</Button><Button kind="ghost" onClick={onExportLogs}>Support file</Button><Button kind="ghost" onClick={onReset}>Change wallet</Button></div></header>
       <main className="dashboard-content">
-        <div className="welcome-row"><div><p className="eyebrow">Payment management</p><h1>Send RLUSD with confidence</h1><p className="muted-line">Create payment plans, review each destination, and sign transactions locally from your connected wallet.</p></div><div className="live-pill"><span className="online-dot" />Connected</div></div>
+        <div className="welcome-row"><div><p className="eyebrow">Payment management</p><h1>Send RLUSD with confidence</h1><p className="muted-line">Create payment plans, review each destination, and confirm each transaction in Crossmark.</p></div><div className="live-pill"><span className="online-dot" />Crossmark connected</div></div>
         <section className="balance-card"><div><p className="eyebrow">Available balance RLUSD</p><div className="balance-number">{money(rlusdBalance, 2)}</div><p className="muted-line">{walletAddress ? shortAddress(walletAddress) : "No wallet connected"}</p></div><div className="balance-actions"><Button kind="secondary" onClick={onRefreshBalance} disabled={balanceLoading}>{balanceLoading ? "Reading..." : "Refresh balance"}</Button>{rlusdBalance <= 0 && <Button kind="soft" onClick={onOpenFunding}>Add RLUSD</Button>}</div></section>
-        <section className="payer-strip"><div><p className="eyebrow">Payment wallet</p><strong>{shortAddress(walletAddress)}</strong><span>Payments are signed locally from the wallet phrase you unlocked.</span></div><Button kind="secondary" onClick={onReset}>Change wallet</Button></section>
-        <div className="content-grid"><PeopleList people={people} selectedId={selectedId} onSelect={onSelect} onAdd={onAdd} />{selectedPerson ? <PersonDetails person={selectedPerson} onEdit={() => onEdit(selectedPerson)} onToggle={() => onToggle(selectedPerson.id)} onPay={() => onPay(selectedPerson)} walletReady={Boolean(walletAddress && walletAddress.startsWith("r"))} paymentMessage={paymentMessage} /> : <div className="details-card details-empty"><div className="empty-sun">*</div><h2>Add a recipient to begin.</h2><p>Create a payment plan with a verified XRPL destination address before sending RLUSD.</p><Button onClick={onAdd}>Create payment plan</Button></div>}</div>
+        <section className="payer-strip"><div><p className="eyebrow">Payment wallet</p><strong>{shortAddress(walletAddress)}</strong><span>This is the active Crossmark wallet. Cadence never stores a seed phrase.</span></div><Button kind="secondary" onClick={onReset}>Change wallet</Button></section>
+        <div className="content-grid"><PeopleList people={people} selectedId={selectedId} onSelect={onSelect} onAdd={onAdd} />{selectedPerson ? <PersonDetails person={selectedPerson} onEdit={() => onEdit(selectedPerson)} onToggle={() => onToggle(selectedPerson.id)} onPay={() => onPay(selectedPerson)} walletReady={walletReady} paymentMessage={paymentMessage} /> : <div className="details-card details-empty"><div className="empty-sun">*</div><h2>Add a recipient to begin.</h2><p>Create a payment plan with a verified XRPL destination address before sending RLUSD.</p><Button onClick={onAdd}>Create payment plan</Button></div>}</div>
         <section className="history-panel"><div className="card-heading"><div><p className="eyebrow">Payment activity</p><h2>Recent actions</h2></div><Button kind="small" onClick={onExportLogs}>Download support file</Button></div>{history.length === 0 ? <p className="muted-line">No payment activity yet.</p> : <div className="history-list">{history.slice(0, 8).map((item) => <div className={`history-row ${item.status}`} key={item.id}><div><b>{item.title}</b><span>{item.detail}</span></div><time>{new Date(item.at).toLocaleString()}</time></div>)}</div>}</section>
         <p className="footer-note">RLUSD is a dollar-denominated token on the XRP Ledger. Network fees, issuer details, and wallet confirmations should always be checked before sending.</p>
       </main>
@@ -1012,6 +992,7 @@ export default function CadenceDashboard() {
   const [setupError, setSetupError] = useState("");
   const [showFunding, setShowFunding] = useState(false);
   const [signingWallet, setSigningWallet] = useState(null);
+  const [walletProvider, setWalletProvider] = useState("");
   const [people, setPeople] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -1101,18 +1082,20 @@ export default function CadenceDashboard() {
     });
 
     try {
-      const wallet = createWalletFromInput(method, accessInput, expectedAddress);
+      const wallet = await connectCrossmarkWallet();
       setSetupError("");
-      setSigningWallet(wallet);
+      setSigningWallet(null);
+      setWalletProvider("crossmark");
       setWalletAddress(wallet.address);
       setDashboardView("employee");
       setScreen("dashboard");
-      logEvent("wallet.setup.success", { method, walletAddress: shortAddress(wallet.address) });
+      logEvent("wallet.setup.success", { method: "crossmark", walletAddress: shortAddress(wallet.address) });
       await refreshBalance(wallet.address);
     } catch (error) {
       setSigningWallet(null);
-      setSetupError(error?.message || "Could not unlock this XRPL wallet phrase.");
-      logEvent("wallet.setup.failed", { method, error });
+      setWalletProvider("");
+      setSetupError(error?.message || "Could not connect Crossmark.");
+      logEvent("wallet.setup.failed", { method: "crossmark", error });
     }
   };
 
@@ -1151,15 +1134,15 @@ export default function CadenceDashboard() {
       return;
     }
 
-    const ready = Boolean(signingWallet && person.address?.startsWith("r"));
+    const ready = Boolean((walletProvider === "crossmark" || signingWallet) && person.address?.startsWith("r"));
     setPeople((current) => current.map((item) => item.id === id ? { ...item, active: true, nextRunAt: ready ? Date.now() : null } : item));
-    setPaymentMessage(ready ? `${person.name}'s plan started. First payment prompt is opening.` : `${person.name}'s plan started. Unlock a wallet phrase and add a destination address to send payments.`);
+    setPaymentMessage(ready ? `${person.name}'s plan started. First payment prompt is opening.` : `${person.name}'s plan started. Connect Crossmark and add a destination address to send payments.`);
     addHistoryItem(setHistory, { status: ready ? "success" : "waiting", title: "Plan started", detail: ready ? `${person.name} - first payment queued now` : `${person.name} - waiting for payer wallet and destination` });
     logEvent("plan.started", {
       id: person.id,
       name: person.name,
       ready,
-      hasSigningWallet: Boolean(signingWallet),
+      hasSigningWallet: Boolean(walletProvider === "crossmark" || signingWallet),
       hasDestination: Boolean(person.address?.startsWith("r")),
       schedule: getSchedule(person),
     });
@@ -1179,7 +1162,7 @@ export default function CadenceDashboard() {
       streamFee: schedule.streamFee,
       treasury: shortAddress(CADENCE_TREASURY_WALLET),
       sourceTag: SOURCE_TAG,
-      payer: signingWallet ? shortAddress(signingWallet.address) : "none",
+      payer: walletAddress ? shortAddress(walletAddress) : "none",
       destination: person.address ? shortAddress(person.address) : "none",
     });
 
@@ -1190,22 +1173,22 @@ export default function CadenceDashboard() {
       return;
     }
 
-    if (!signingWallet || !person.address?.startsWith("r")) {
-      setPaymentMessage(`${person.name} needs an unlocked wallet phrase and destination address.`);
-      addHistoryItem(setHistory, { status: "waiting", title: "Payment waiting", detail: `${person.name} needs an unlocked wallet phrase and destination address.` });
+    if (!(walletProvider === "crossmark" || signingWallet) || !person.address?.startsWith("r")) {
+      setPaymentMessage(`${person.name} needs a connected wallet and destination address.`);
+      addHistoryItem(setHistory, { status: "waiting", title: "Payment waiting", detail: `${person.name} needs a connected wallet and destination address.` });
       logEvent("payment.installment.blocked", {
         reason: "missing_wallet_or_destination",
-        hasSigningWallet: Boolean(signingWallet),
+        hasSigningWallet: Boolean(walletProvider === "crossmark" || signingWallet),
         hasDestination: Boolean(person.address?.startsWith("r")),
       });
       return;
     }
 
-    setPaymentMessage("Signing and submitting the installment and stream fee from the unlocked wallet...");
+    setPaymentMessage(walletProvider === "crossmark" ? "Confirm the installment and stream fee in Crossmark..." : "Signing and submitting the installment and stream fee from the connected wallet...");
     addHistoryItem(setHistory, { status: "waiting", title: source === "manual" ? "Manual payment started" : "Scheduled payment started", detail: `${person.name} - ${money(schedule.perPayment, 4)} plus ${money(schedule.streamFee, 6)} fee - source tag ${SOURCE_TAG}` });
     logEvent("payment.local_signing.started", {
       transactionType: "Payment",
-      account: shortAddress(signingWallet.address),
+      account: shortAddress(walletAddress),
       destination: shortAddress(person.address),
       treasury: shortAddress(CADENCE_TREASURY_WALLET),
       sourceTag: SOURCE_TAG,
@@ -1214,7 +1197,13 @@ export default function CadenceDashboard() {
       issuer: RLUSD_ISSUER,
     });
     try {
-      const { result, hash, fee, feeError } = await submitRlusdPayment({
+      const submitter = walletProvider === "crossmark" ? submitCrossmarkRlusdPayment : submitRlusdPayment;
+      const { result, hash, fee, feeError } = await submitter(walletProvider === "crossmark" ? {
+        account: walletAddress,
+        destination: person.address,
+        amount: tokenAmount(schedule.perPayment),
+        feeAmount: tokenAmount(schedule.streamFee),
+      } : {
         wallet: signingWallet,
         destination: person.address,
         amount: tokenAmount(schedule.perPayment),
@@ -1282,7 +1271,7 @@ export default function CadenceDashboard() {
     }, 10000);
 
     return () => window.clearInterval(timer);
-  }, [people, signingWallet]);
+  }, [people, signingWallet, walletProvider, walletAddress]);
   const resetWallet = () => {
     logEvent("wallet.reset", { previousWallet: walletAddress ? shortAddress(walletAddress) : "none", peopleCount: people.length });
     setScreen("intro");
@@ -1291,6 +1280,7 @@ export default function CadenceDashboard() {
     setWalletAddress("");
     setRlusdBalance(0);
     setSigningWallet(null);
+    setWalletProvider("");
     setSetupError("");
     setDashboardView("employee");
   };
@@ -1541,14 +1531,13 @@ export default function CadenceDashboard() {
         }
       `}</style>
       {screen === "intro" && <Intro method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} expectedAddress={expectedAddress} setExpectedAddress={setExpectedAddress} onSubmit={finishSetup} error={setupError} />}
-      {screen === "setup" && <WalletSetup method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} expectedAddress={expectedAddress} setExpectedAddress={setExpectedAddress} onSubmit={finishSetup} error={setupError} />}
       {screen === "dashboard" && (
         <>
           {editorOpen ? (
             <div className="app-shell"><header className="topbar"><Brand compact /><Button kind="ghost" onClick={() => setEditorOpen(false)}>Back to dashboard</Button></header><main className="dashboard-content"><PersonEditor person={editingPerson} onSave={savePerson} onCancel={() => { setEditorOpen(false); setEditingPerson(null); }} /></main></div>
           ) : dashboardView === "employee" ? (
             <EmployeeDashboard walletAddress={walletAddress} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} people={people} onBack={() => setDashboardView("employer")} onExportLogs={exportLogs} onReset={resetWallet} />
-          ) : <Dashboard walletAddress={walletAddress} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} onOpenFunding={() => setShowFunding(true)} onReset={resetWallet} people={people} onAdd={() => { setEditingPerson(null); setEditorOpen(true); }} selectedId={selectedId} onSelect={setSelectedId} onSave={savePerson} onEdit={(person) => { setEditingPerson(person); setEditorOpen(true); }} onToggle={togglePlan} onPay={payInstallment} paymentMessage={paymentMessage} history={history} onExportLogs={exportLogs} onOpenEmployee={() => setDashboardView("employee")} />}
+          ) : <Dashboard walletAddress={walletAddress} walletProvider={walletProvider} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} onOpenFunding={() => setShowFunding(true)} onReset={resetWallet} people={people} onAdd={() => { setEditingPerson(null); setEditorOpen(true); }} selectedId={selectedId} onSelect={setSelectedId} onSave={savePerson} onEdit={(person) => { setEditingPerson(person); setEditorOpen(true); }} onToggle={togglePlan} onPay={payInstallment} paymentMessage={paymentMessage} history={history} onExportLogs={exportLogs} onOpenEmployee={() => setDashboardView("employee")} />}
           {showFunding && <FundingModal onClose={() => setShowFunding(false)} />}
         </>
       )}

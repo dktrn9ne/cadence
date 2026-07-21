@@ -1,20 +1,23 @@
 # Cadence
 
-Cadence is a local desktop wallet app for RLUSD income verification and scheduled XRP Ledger payments. It unlocks an XRPL wallet locally, reads the wallet's RLUSD balance and Cadence-tagged income from XRPL mainnet, and can submit recipient payments with a transparent 1.5% stream fee to the Cadence treasury wallet.
+Cadence is a consumer wallet dashboard for RLUSD income verification and scheduled XRP Ledger payments. It connects to the wallet selected in Crossmark, reads that wallet's live XRPL data, and asks Crossmark to sign each real payment.
+
+Cadence does not ask consumers for a seed phrase in the normal flow.
 
 ## Run From latest.zip
 
 1. Install Node.js LTS from [nodejs.org](https://nodejs.org/).
-2. Download `latest.zip` from this repo.
-3. Unzip it.
-4. Open a terminal in the unzipped folder.
-5. Install dependencies:
+2. Install and unlock Crossmark.
+3. Download `latest.zip` from this repo.
+4. Unzip it.
+5. Open a terminal in the unzipped folder.
+6. Install dependencies:
 
 ```powershell
 npm install
 ```
 
-6. Start the desktop app:
+7. Start Cadence:
 
 ```powershell
 npm run desktop:dev
@@ -27,35 +30,35 @@ npm.cmd install
 npm.cmd run desktop:dev
 ```
 
-## What This Version Does
+For wallet signing demos, open the local app URL in the browser where Crossmark is installed, usually:
 
-- Opens to a wallet-first consumer dashboard after unlock.
-- Unlocks an XRPL wallet locally from an XRPL family seed or BIP39 mnemonic phrase.
-- Verifies the derived wallet against an expected public `r...` address before continuing.
-- Reads the connected wallet's RLUSD trustline balance from XRPL mainnet.
-- Builds income verification from real `account_tx` ledger data for the connected wallet only.
-- Filters verified income to successful incoming RLUSD payments from the Cadence treasury/employer wallet with `SourceTag: 2606250005`.
-- Exports income proof CSV and a local support file when needed.
-- Lets a payer create recipients and scheduled RLUSD payment plans.
-- Sends each recipient installment as RLUSD and sends a separate 1.5% RLUSD stream fee to the Cadence treasury wallet.
-- Shows the recipient amount, stream fee, total debit, source tag, and treasury wallet before payment.
-- Signs payments locally with `xrpl` and submits through `wss://s1.ripple.com`.
+```text
+http://127.0.0.1:5173/
+```
 
-## Stream Fee
+## Consumer Flow
 
-- Fee rate: `1.5%`
+1. Open Cadence.
+2. Click `Connect Crossmark`.
+3. Approve the Crossmark connection.
+4. Confirm the wallet chip in Cadence matches the active Crossmark wallet.
+5. Review the connected wallet's RLUSD balance and income verification dashboard.
+6. Add a recipient XRPL address and payment rhythm.
+7. Confirm each payment request in Crossmark.
+
+The income verification page reads real `account_tx` ledger data for the connected wallet only. It filters verified income to successful incoming RLUSD payments from the Cadence employer wallet using `SourceTag: 2606250005`.
+
+## Payments And Stream Fee
+
+Cadence can submit real XRPL mainnet transactions.
+
+- Recipient payments are RLUSD `Payment` transactions.
+- Every stream/installment includes a separate 1.5% RLUSD stream fee.
 - Treasury wallet: `rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864`
-- Fee asset: RLUSD
-- Fee timing: submitted with each stream/installment as a separate XRPL `Payment`
+- Fee rate: `1.5%`
+- Source tag: `2606250005`
 
-## Safety Notes
-
-Cadence can sign real XRPL mainnet transactions.
-
-- Only unlock wallets you control.
-- Confirm the recipient address, amount, fee, treasury wallet, RLUSD issuer, and source tag before sending.
-- The wallet secret is used locally for the session and is redacted from support logs.
-- Network fees, account reserves, and trustline behavior are controlled by XRPL mainnet.
+Crossmark may show two confirmation prompts for one installment: one for the recipient payment and one for the treasury fee.
 
 ## XRPL Constants
 
@@ -64,17 +67,28 @@ Cadence can sign real XRPL mainnet transactions.
 - Asset: RLUSD
 - RLUSD issuer: `rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De`
 - RLUSD currency code: `524C555344000000000000000000000000000000`
+- Cadence employer/treasury wallet: `rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864`
 - Source tag: `2606250005`
+
+## Safety Notes
+
+- Only connect wallets you control.
+- Confirm the recipient address, amount, fee, treasury wallet, RLUSD issuer, and source tag before signing.
+- Cadence never stores a consumer seed phrase.
+- Support logs redact secret-like fields before export.
+- Network fees, account reserves, and trustline behavior are controlled by XRPL mainnet.
 
 ## Troubleshooting
 
-If the desktop app opens to a stale screen, stop old Vite/Electron processes and restart from the current folder.
+If Cadence shows a different wallet than Crossmark, disconnect and reconnect from the opening screen after selecting the correct wallet in Crossmark. Cadence should use the exact public `r...` address returned by Crossmark.
+
+If Crossmark is not detected in the desktop shell, keep the Vite server running and open `http://127.0.0.1:5173/` in the browser where the Crossmark extension is installed.
 
 If the app reports an RLUSD balance of zero, confirm the connected wallet is funded on XRPL mainnet and has an RLUSD trustline to the issuer above.
 
-If a BIP39 mnemonic fails, check the word spelling/order. If your secret starts with `s`, choose `Auto-detect wallet secret` or `XRPL family seed`.
+If a payment does not submit, check Crossmark for a cancelled prompt, insufficient XRP reserve/network fees, a missing RLUSD trustline, or a recipient address typo.
 
-If a mnemonic opens a different wallet than expected, paste the wallet's public `r...` address into `Expected public wallet address` before connecting. Cadence checks common XRPL BIP39 derivation paths and signing algorithms and will refuse to continue unless it finds that exact address.
+If the desktop app opens to a stale screen, stop old Vite/Electron processes and restart from the current folder.
 
 ## Scripts
 
