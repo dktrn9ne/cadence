@@ -113,6 +113,29 @@ const isRlusdAmount = (amount) =>
   (amount.currency === "RLUSD" || amount.currency === RLUSD_CURRENCY) &&
   amount.issuer === RLUSD_ISSUER;
 
+const isAccountNotFoundError = (error) =>
+  /actnotfound|account not found/i.test(error?.message || String(error));
+
+const emptyIncomeProofData = (employeeWallet, employerWallet) => ({
+  employeeWallet,
+  employerWallet,
+  sourceTag: SOURCE_TAG,
+  markerRemaining: false,
+  fetchedCount: 0,
+  incomeRows: [],
+  stats: {
+    incomeCount: 0,
+    totalRlusd: 0,
+    excludedCount: 0,
+    totalExcludedXrp: 0,
+    projectedWeekly: 0,
+    projectedMonthly: 0,
+    projectedAnnual: 0,
+    lifetimeMatches: 0,
+    observedDays: 0,
+  },
+});
+
 const readIncomeProofData = async (employeeWallet, employerWallet = CADENCE_EMPLOYER_WALLET) => {
   if (!employeeWallet?.startsWith("r")) {
     throw new Error("Enter or unlock a valid employee XRPL wallet first.");
@@ -121,16 +144,24 @@ const readIncomeProofData = async (employeeWallet, employerWallet = CADENCE_EMPL
   let marker;
   const transactions = [];
   for (let page = 0; page < 20; page += 1) {
-    const result = await xrplRequest({
-      command: "account_tx",
-      account: employeeWallet,
-      ledger_index_min: -1,
-      ledger_index_max: -1,
-      binary: false,
-      forward: false,
-      limit: 400,
-      ...(marker ? { marker } : {}),
-    });
+    let result;
+    try {
+      result = await xrplRequest({
+        command: "account_tx",
+        account: employeeWallet,
+        ledger_index_min: -1,
+        ledger_index_max: -1,
+        binary: false,
+        forward: false,
+        limit: 400,
+        ...(marker ? { marker } : {}),
+      });
+    } catch (error) {
+      if (page === 0 && isAccountNotFoundError(error)) {
+        return emptyIncomeProofData(employeeWallet, employerWallet);
+      }
+      throw error;
+    }
     transactions.push(...(result.transactions || []));
     marker = result.marker;
     if (!marker) break;
@@ -271,12 +302,18 @@ const readRlusdBalance = async (address) => {
     return 0;
   }
 
-  const result = await xrplRequest({
-    command: "account_lines",
-    account: address,
-    peer: RLUSD_ISSUER,
-    ledger_index: "validated",
-  });
+  let result;
+  try {
+    result = await xrplRequest({
+      command: "account_lines",
+      account: address,
+      peer: RLUSD_ISSUER,
+      ledger_index: "validated",
+    });
+  } catch (error) {
+    if (isAccountNotFoundError(error)) return 0;
+    throw error;
+  }
   const line = result.lines?.find((item) =>
     (item.currency === "RLUSD" || item.currency === RLUSD_CURRENCY) && item.account === RLUSD_ISSUER
   );
