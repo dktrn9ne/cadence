@@ -18,6 +18,8 @@ const COLORS = {
 const RLUSD_CURRENCY = "524C555344000000000000000000000000000000";
 const RLUSD_ISSUER = "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De";
 const CADENCE_EMPLOYER_WALLET = "rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864";
+const CADENCE_TREASURY_WALLET = "rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864";
+const STREAM_FEE_RATE = 0.015;
 const SOURCE_TAG = 2606250005;
 const LOG_STORAGE_KEY = "cadence-debug-logs-v1";
 const MAX_LOGS = 500;
@@ -58,6 +60,8 @@ const money = (value, digits = 2) => {
     maximumFractionDigits: digits,
   })}`;
 };
+
+const tokenAmount = (value) => Math.max(0, Number(value) || 0).toFixed(6);
 
 const shortAddress = (address) =>
   address ? `${address.slice(0, 7)}...${address.slice(-5)}` : "Not added yet";
@@ -274,25 +278,44 @@ const createWalletFromInput = (method, value) => {
   }
 };
 
-const submitRlusdPayment = async ({ wallet, destination, amount }) => {
+const buildRlusdPayment = ({ wallet, destination, amount }) => ({
+  TransactionType: "Payment",
+  Account: wallet.address,
+  Destination: destination,
+  SourceTag: SOURCE_TAG,
+  Amount: {
+    currency: RLUSD_CURRENCY,
+    issuer: RLUSD_ISSUER,
+    value: amount,
+  },
+});
+
+const submitRlusdPayment = async ({ wallet, destination, amount, feeAmount = "0" }) => {
   const client = new Client("wss://s1.ripple.com");
   await client.connect();
   try {
-    const transaction = {
-      TransactionType: "Payment",
-      Account: wallet.address,
-      Destination: destination,
-      SourceTag: SOURCE_TAG,
-      Amount: {
-        currency: RLUSD_CURRENCY,
-        issuer: RLUSD_ISSUER,
-        value: amount,
-      },
-    };
+    const transaction = buildRlusdPayment({ wallet, destination, amount });
     const prepared = await client.autofill(transaction);
     const signed = wallet.sign(prepared);
     const result = await client.submitAndWait(signed.tx_blob);
-    return { result, hash: signed.hash, transaction };
+    let fee = null;
+    let feeError = null;
+    if (Number(feeAmount) > 0 && destination !== CADENCE_TREASURY_WALLET) {
+      try {
+        const feeTransaction = buildRlusdPayment({
+          wallet,
+          destination: CADENCE_TREASURY_WALLET,
+          amount: feeAmount,
+        });
+        const preparedFee = await client.autofill(feeTransaction);
+        const signedFee = wallet.sign(preparedFee);
+        const feeResult = await client.submitAndWait(signedFee.tx_blob);
+        fee = { result: feeResult, hash: signedFee.hash, transaction: feeTransaction };
+      } catch (error) {
+        feeError = error;
+      }
+    }
+    return { result, hash: signed.hash, transaction, fee, feeError };
   } finally {
     await client.disconnect();
   }
@@ -329,6 +352,9 @@ const getSchedule = (person) => {
   const frequency = TIME_UNITS[person.frequency] || TIME_UNITS.minute;
   const payments = Math.max(1, Math.floor(TIME_UNITS.week.seconds / frequency.seconds));
   const perPayment = weeklyPay / payments;
+  const streamFee = perPayment * STREAM_FEE_RATE;
+  const weeklyStreamFee = weeklyPay * STREAM_FEE_RATE;
+  const totalPerPayment = perPayment + streamFee;
 
   return {
     total: weeklyPay,
@@ -338,6 +364,9 @@ const getSchedule = (person) => {
     weeklyPay,
     payments,
     perPayment,
+    streamFee,
+    weeklyStreamFee,
+    totalPerPayment,
     weeklyEquivalent: weeklyPay,
     frequencyLabel: frequency.label,
     frequencySeconds: frequency.seconds,
@@ -393,7 +422,7 @@ function Brand({ compact = false }) {
         <div style={{ fontFamily: "Georgia, serif", fontSize: compact ? 22 : 28, fontWeight: 700, letterSpacing: "-0.04em" }}>
           Cadence
         </div>
-        {!compact && <div style={{ color: COLORS.muted, fontSize: 12, marginTop: 2 }}>small payments, right on time</div>}
+        {!compact && <div style={{ color: COLORS.muted, fontSize: 12, marginTop: 2 }}>verified RLUSD income</div>}
       </div>
     </div>
   );
@@ -556,8 +585,10 @@ function ScheduleSummary({ person }) {
   return (
     <div className="schedule-summary">
       <div><span className="summary-label">Each payment</span><strong>{money(schedule.perPayment, 6)}</strong></div>
+      <div><span className="summary-label">1.5% stream fee</span><strong>{money(schedule.streamFee, 6)}</strong></div>
       <div><span className="summary-label">Payments per week</span><strong>{schedule.payments.toLocaleString()}</strong></div>
       <div><span className="summary-label">Weekly total</span><strong>{money(schedule.weeklyPay, 2)}</strong></div>
+      <div><span className="summary-label">Weekly fees</span><strong>{money(schedule.weeklyStreamFee, 2)}</strong></div>
     </div>
   );
 }
@@ -593,31 +624,16 @@ function PersonDetails({ person, onEdit, onToggle, onPay, walletReady, paymentMe
     <div className="details-card">
       <div className="details-top"><div className="large-avatar">{person.name.slice(0, 1).toUpperCase()}</div><div><p className="eyebrow">Selected person</p><h2>{person.name}</h2><p className="muted-line">{person.role || "No role added"} {person.email ? ` ${person.email}` : ""}</p></div><button className="text-button edit-button" onClick={onEdit}>Edit</button></div>
       <div className="address-line"><span>Destination</span><code>{shortAddress(person.address)}</code></div>
-      <div className="detail-highlight"><div><span className="eyebrow">Weekly pay</span><strong>{money(schedule.weeklyPay)}</strong><small>distributed across 1 week</small></div><div className="highlight-arrow">?</div><div><span className="eyebrow">Each payout</span><strong>{money(schedule.perPayment, 6)}</strong><small>every {schedule.frequencyLabel}</small></div></div>
-      <div className="plan-meter"><div><span>Paid prompts</span><strong>{paidCount} / {schedule.payments.toLocaleString()}</strong></div><div><span>Next prompt</span><strong>{nextRun}</strong></div><div><span>Source tag</span><strong>{SOURCE_TAG}</strong></div></div>
+      <div className="detail-highlight"><div><span className="eyebrow">Weekly pay</span><strong>{money(schedule.weeklyPay)}</strong><small>recipient amount across 1 week</small></div><div className="highlight-arrow">+</div><div><span className="eyebrow">Each payout</span><strong>{money(schedule.perPayment, 6)}</strong><small>{money(schedule.streamFee, 6)} treasury fee</small></div></div>
+      <div className="plan-meter"><div><span>Installments sent</span><strong>{paidCount} / {schedule.payments.toLocaleString()}</strong></div><div><span>Next send</span><strong>{nextRun}</strong></div><div><span>Total debit</span><strong>{money(schedule.totalPerPayment, 6)}</strong></div><div><span>Fee treasury</span><strong>{shortAddress(CADENCE_TREASURY_WALLET)}</strong></div><div><span>Source tag</span><strong>{SOURCE_TAG}</strong></div></div>
       <div className="details-actions"><Button kind={person.active ? "secondary" : "primary"} onClick={onToggle}>{person.active ? "Pause plan" : "Start plan"}</Button><Button kind="secondary" onClick={onPay} disabled={!walletReady || !person.address.startsWith("r")}>Pay one installment</Button></div>
       {!walletReady && <p className="inline-note">Unlock your wallet phrase first to make an on-chain payment.</p>}
       {walletReady && !person.address.startsWith("r") && <p className="inline-note">Add a public XRPL destination address before paying.</p>}
       {paymentMessage && <div className="success-message">{paymentMessage}</div>}
-      <div className="safe-payment-note"><span>?</span> Cadence divides the weekly pay by the selected frequency. Your wallet may still ask you to confirm each on-chain payment.</div>
+      <div className="safe-payment-note"><span>?</span> Cadence sends the recipient payment plus a 1.5% RLUSD stream fee to the treasury wallet. Your wallet may ask you to confirm both on-chain payments.</div>
     </div>
   );
 }
-
-const makeEmployeeHistory = (perPayment, count = 8) => {
-  const now = Date.now();
-  return Array.from({ length: count }, (_, index) => {
-    const stamp = new Date(now - index * 15000);
-    const seed = (count - index + 1) * 2654435761;
-    const hash = Math.abs(seed).toString(16).toUpperCase().padStart(8, "0").slice(0, 8);
-    return {
-      time: stamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-      amount: perPayment.toFixed(6),
-      hash: `${hash}...`,
-      status: "Completed",
-    };
-  });
-};
 
 function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onReset }) {
   const [ledgerOpen, setLedgerOpen] = useState(false);
@@ -676,7 +692,7 @@ function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onR
         <Brand compact />
         <div className="topbar-right">
           <div className="wallet-chip"><span className="online-dot" />Connected wallet {shortAddress(connectedWallet)}</div>
-          <Button kind="ghost" onClick={onExportLogs}>Export logs</Button>
+          <Button kind="ghost" onClick={onExportLogs}>Download support file</Button>
           <Button kind="ghost" onClick={onBack}>Back to dashboard</Button>
           <Button kind="ghost" onClick={onReset}>Change wallet</Button>
         </div>
@@ -832,9 +848,9 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
         <Brand compact />
         <div className="topbar-right">
           <div className="wallet-chip"><span className="online-dot" />{shortAddress(walletAddress || employee.address)}</div>
-          <Button kind="ghost" onClick={onBack}>Employer view</Button>
+          <Button kind="ghost" onClick={onBack}>Manage payments</Button>
           <Button kind="ghost" onClick={() => setEmployeeView("proof")}>Income proof</Button>
-          <Button kind="ghost" onClick={onExportLogs}>Export logs</Button>
+          <Button kind="ghost" onClick={onExportLogs}>Support file</Button>
           <Button kind="ghost" onClick={onReset}>Change wallet</Button>
         </div>
       </header>
@@ -915,17 +931,17 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
   );
 }
 
-function Dashboard({ walletAddress, rlusdBalance, balanceLoading, onRefreshBalance, onOpenFunding, onReset, people, onAdd, selectedId, onSelect, onSave, onEdit, onToggle, onPay, paymentMessage, history, debugLogs, onExportLogs, onClearLogs, onOpenEmployee }) {
+function Dashboard({ walletAddress, rlusdBalance, balanceLoading, onRefreshBalance, onOpenFunding, onReset, people, onAdd, selectedId, onSelect, onSave, onEdit, onToggle, onPay, paymentMessage, history, onExportLogs, onOpenEmployee }) {
   const selectedPerson = people.find((person) => person.id === selectedId);
   return (
     <div className="app-shell">
-      <header className="topbar"><Brand compact /><div className="topbar-right"><div className="wallet-chip"><span className="online-dot" />{shortAddress(walletAddress)}</div><Button kind="ghost" onClick={onOpenEmployee}>Employee view</Button><Button kind="ghost" onClick={onExportLogs}>Export logs</Button><Button kind="ghost" onClick={onClearLogs}>Clear logs</Button><Button kind="ghost" onClick={onReset}>Change wallet</Button></div></header>
+      <header className="topbar"><Brand compact /><div className="topbar-right"><div className="wallet-chip"><span className="online-dot" />{shortAddress(walletAddress)}</div><Button kind="ghost" onClick={onOpenEmployee}>Wallet dashboard</Button><Button kind="ghost" onClick={onExportLogs}>Support file</Button><Button kind="ghost" onClick={onReset}>Change wallet</Button></div></header>
       <main className="dashboard-content">
-        <div className="welcome-row"><div><p className="eyebrow">Good to see you</p><h1>Your payment rhythm</h1><p className="muted-line">Keep RLUSD moving at a pace that feels natural.</p></div><div className="live-pill"><span className="online-dot" />Local session</div></div>
-        <section className="balance-card"><div><p className="eyebrow">Available balance  RLUSD</p><div className="balance-number">{money(rlusdBalance, 2)}</div><p className="muted-line">{walletAddress ? shortAddress(walletAddress) : "Local wallet test mode"}</p></div><div className="balance-actions"><Button kind="secondary" onClick={onRefreshBalance} disabled={balanceLoading}>{balanceLoading ? "Reading..." : "Refresh balance"}</Button>{rlusdBalance <= 0 && <Button kind="soft" onClick={onOpenFunding}>How to get RLUSD</Button>}</div></section>
+        <div className="welcome-row"><div><p className="eyebrow">Payment management</p><h1>Send RLUSD with confidence</h1><p className="muted-line">Create payment plans, review each destination, and sign transactions locally from your connected wallet.</p></div><div className="live-pill"><span className="online-dot" />Connected</div></div>
+        <section className="balance-card"><div><p className="eyebrow">Available balance RLUSD</p><div className="balance-number">{money(rlusdBalance, 2)}</div><p className="muted-line">{walletAddress ? shortAddress(walletAddress) : "No wallet connected"}</p></div><div className="balance-actions"><Button kind="secondary" onClick={onRefreshBalance} disabled={balanceLoading}>{balanceLoading ? "Reading..." : "Refresh balance"}</Button>{rlusdBalance <= 0 && <Button kind="soft" onClick={onOpenFunding}>Add RLUSD</Button>}</div></section>
         <section className="payer-strip"><div><p className="eyebrow">Payment wallet</p><strong>{shortAddress(walletAddress)}</strong><span>Payments are signed locally from the wallet phrase you unlocked.</span></div><Button kind="secondary" onClick={onReset}>Change wallet</Button></section>
-        <div className="content-grid"><PeopleList people={people} selectedId={selectedId} onSelect={onSelect} onAdd={onAdd} />{selectedPerson ? <PersonDetails person={selectedPerson} onEdit={() => onEdit(selectedPerson)} onToggle={() => onToggle(selectedPerson.id)} onPay={() => onPay(selectedPerson)} walletReady={Boolean(walletAddress && walletAddress.startsWith("r"))} paymentMessage={paymentMessage} /> : <div className="details-card details-empty"><div className="empty-sun">*</div><h2>Your next step is small.</h2><p>Add a person and Cadence will turn their total pay into clear, simple installments.</p><Button onClick={onAdd}>Create a payment plan</Button></div>}</div>
-        <section className="history-panel"><div className="card-heading"><div><p className="eyebrow">Diagnostics</p><h2>Debug logs</h2></div><Button kind="small" onClick={onExportLogs}>Export logs</Button></div>{debugLogs.length === 0 ? <p className="muted-line">No diagnostic logs yet.</p> : <div className="debug-log-list">{debugLogs.slice(0, 12).map((item, index) => <div className="debug-log-row" key={`${item.id}-${index}`}><time>{new Date(item.at).toLocaleString()}</time><b>{item.event}</b><code>{JSON.stringify(item.payload)}</code></div>)}</div>}</section>
+        <div className="content-grid"><PeopleList people={people} selectedId={selectedId} onSelect={onSelect} onAdd={onAdd} />{selectedPerson ? <PersonDetails person={selectedPerson} onEdit={() => onEdit(selectedPerson)} onToggle={() => onToggle(selectedPerson.id)} onPay={() => onPay(selectedPerson)} walletReady={Boolean(walletAddress && walletAddress.startsWith("r"))} paymentMessage={paymentMessage} /> : <div className="details-card details-empty"><div className="empty-sun">*</div><h2>Add a recipient to begin.</h2><p>Create a payment plan with a verified XRPL destination address before sending RLUSD.</p><Button onClick={onAdd}>Create payment plan</Button></div>}</div>
+        <section className="history-panel"><div className="card-heading"><div><p className="eyebrow">Payment activity</p><h2>Recent actions</h2></div><Button kind="small" onClick={onExportLogs}>Download support file</Button></div>{history.length === 0 ? <p className="muted-line">No payment activity yet.</p> : <div className="history-list">{history.slice(0, 8).map((item) => <div className={`history-row ${item.status}`} key={item.id}><div><b>{item.title}</b><span>{item.detail}</span></div><time>{new Date(item.at).toLocaleString()}</time></div>)}</div>}</section>
         <p className="footer-note">RLUSD is a dollar-denominated token on the XRP Ledger. Network fees, issuer details, and wallet confirmations should always be checked before sending.</p>
       </main>
     </div>
@@ -949,7 +965,7 @@ export default function CadenceDashboard() {
   const [paymentMessage, setPaymentMessage] = useState("");
   const [history, setHistory] = useState([]);
   const [debugLogs, setDebugLogs] = useState(loadStoredLogs);
-  const [dashboardView, setDashboardView] = useState("employer");
+  const [dashboardView, setDashboardView] = useState("employee");
   const autoPayingRef = useRef(false);
 
   const selectedPerson = useMemo(() => people.find((person) => person.id === selectedId), [people, selectedId]);
@@ -1035,6 +1051,7 @@ export default function CadenceDashboard() {
       setSetupError("");
       setSigningWallet(wallet);
       setWalletAddress(wallet.address);
+      setDashboardView("employee");
       setScreen("dashboard");
       logEvent("wallet.setup.success", { method, walletAddress: shortAddress(wallet.address) });
       await refreshBalance(wallet.address);
@@ -1061,6 +1078,8 @@ export default function CadenceDashboard() {
       payMode: next.payMode,
       weeklyPay: schedule.weeklyPay,
       perPayment: schedule.perPayment,
+      streamFee: schedule.streamFee,
+      treasury: shortAddress(CADENCE_TREASURY_WALLET),
       frequency: schedule.frequencyLabel,
       paymentsPerWeek: schedule.payments,
     });
@@ -1103,6 +1122,8 @@ export default function CadenceDashboard() {
       paidCount,
       plannedPayments: schedule.payments,
       perPayment: schedule.perPayment,
+      streamFee: schedule.streamFee,
+      treasury: shortAddress(CADENCE_TREASURY_WALLET),
       sourceTag: SOURCE_TAG,
       payer: signingWallet ? shortAddress(signingWallet.address) : "none",
       destination: person.address ? shortAddress(person.address) : "none",
@@ -1126,38 +1147,52 @@ export default function CadenceDashboard() {
       return;
     }
 
-    setPaymentMessage("Signing and submitting the installment from the unlocked wallet...");
-    addHistoryItem(setHistory, { status: "waiting", title: source === "manual" ? "Manual payment started" : "Scheduled payment started", detail: `${person.name} - ${money(schedule.perPayment, 4)} - source tag ${SOURCE_TAG}` });
+    setPaymentMessage("Signing and submitting the installment and stream fee from the unlocked wallet...");
+    addHistoryItem(setHistory, { status: "waiting", title: source === "manual" ? "Manual payment started" : "Scheduled payment started", detail: `${person.name} - ${money(schedule.perPayment, 4)} plus ${money(schedule.streamFee, 6)} fee - source tag ${SOURCE_TAG}` });
     logEvent("payment.local_signing.started", {
       transactionType: "Payment",
       account: shortAddress(signingWallet.address),
       destination: shortAddress(person.address),
+      treasury: shortAddress(CADENCE_TREASURY_WALLET),
       sourceTag: SOURCE_TAG,
-      amount: schedule.perPayment.toFixed(6),
+      amount: tokenAmount(schedule.perPayment),
+      streamFee: tokenAmount(schedule.streamFee),
       issuer: RLUSD_ISSUER,
     });
     try {
-      const { result, hash } = await submitRlusdPayment({
+      const { result, hash, fee, feeError } = await submitRlusdPayment({
         wallet: signingWallet,
         destination: person.address,
-        amount: schedule.perPayment.toFixed(6),
+        amount: tokenAmount(schedule.perPayment),
+        feeAmount: tokenAmount(schedule.streamFee),
       });
       const tx = result?.result || result || {};
       const txHash = hash || tx.hash;
+      const feeHash = fee?.hash || fee?.result?.result?.hash || fee?.result?.hash || null;
       const nextPaidCount = paidCount + 1;
       const complete = nextPaidCount >= schedule.payments;
+      const stopForFee = Boolean(feeError);
       setPeople((current) => current.map((item) => item.id === person.id ? {
         ...item,
         paidCount: nextPaidCount,
-        active: complete ? false : item.active,
-        nextRunAt: complete ? null : Date.now() + getFrequencyMs(item),
+        active: complete || stopForFee ? false : item.active,
+        nextRunAt: complete || stopForFee ? null : Date.now() + getFrequencyMs(item),
       } : item));
-      setPaymentMessage(txHash ? `Payment submitted: ${txHash.slice(0, 10)}...` : "Payment submitted.");
-      addHistoryItem(setHistory, { status: "success", title: complete ? "Final payment submitted" : "Payment submitted", detail: txHash ? `${person.name} - ${money(schedule.perPayment, 4)} - tag ${SOURCE_TAG} - ${txHash}` : `${person.name} - ${money(schedule.perPayment, 4)} - tag ${SOURCE_TAG}` });
+      if (feeError) {
+        setPaymentMessage(`Recipient payment submitted, but the treasury fee failed. Plan paused. Payment: ${txHash?.slice(0, 10) || "submitted"}...`);
+        addHistoryItem(setHistory, { status: "failed", title: "Treasury fee not submitted", detail: `${person.name} received ${money(schedule.perPayment, 4)} but ${money(schedule.streamFee, 6)} fee failed. Payment hash ${txHash || "unavailable"}` });
+        logEvent("payment.fee_failed", { personId: person.id, name: person.name, hash: txHash || null, streamFee: schedule.streamFee, treasury: shortAddress(CADENCE_TREASURY_WALLET), error: feeError });
+        return;
+      }
+      setPaymentMessage(txHash ? `Payment submitted: ${txHash.slice(0, 10)}...${feeHash ? ` Fee: ${feeHash.slice(0, 10)}...` : ""}` : "Payment submitted.");
+      addHistoryItem(setHistory, { status: "success", title: complete ? "Final payment submitted" : "Payment submitted", detail: txHash ? `${person.name} - ${money(schedule.perPayment, 4)} + ${money(schedule.streamFee, 6)} fee - tag ${SOURCE_TAG} - ${txHash}${feeHash ? ` / fee ${feeHash}` : ""}` : `${person.name} - ${money(schedule.perPayment, 4)} + ${money(schedule.streamFee, 6)} fee - tag ${SOURCE_TAG}` });
       logEvent("payment.submitted", {
         personId: person.id,
         name: person.name,
         hash: txHash || null,
+        feeHash,
+        streamFee: schedule.streamFee,
+        treasury: shortAddress(CADENCE_TREASURY_WALLET),
         nextPaidCount,
         complete,
         nextRunAt: complete ? null : Date.now() + getFrequencyMs(person),
@@ -1202,7 +1237,7 @@ export default function CadenceDashboard() {
     setRlusdBalance(0);
     setSigningWallet(null);
     setSetupError("");
-    setDashboardView("employer");
+    setDashboardView("employee");
   };
 
   return (
@@ -1458,7 +1493,7 @@ export default function CadenceDashboard() {
             <div className="app-shell"><header className="topbar"><Brand compact /><Button kind="ghost" onClick={() => setEditorOpen(false)}>Back to dashboard</Button></header><main className="dashboard-content"><PersonEditor person={editingPerson} onSave={savePerson} onCancel={() => { setEditorOpen(false); setEditingPerson(null); }} /></main></div>
           ) : dashboardView === "employee" ? (
             <EmployeeDashboard walletAddress={walletAddress} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} people={people} onBack={() => setDashboardView("employer")} onExportLogs={exportLogs} onReset={resetWallet} />
-          ) : <Dashboard walletAddress={walletAddress} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} onOpenFunding={() => setShowFunding(true)} onReset={resetWallet} people={people} onAdd={() => { setEditingPerson(null); setEditorOpen(true); }} selectedId={selectedId} onSelect={setSelectedId} onSave={savePerson} onEdit={(person) => { setEditingPerson(person); setEditorOpen(true); }} onToggle={togglePlan} onPay={payInstallment} paymentMessage={paymentMessage} history={history} debugLogs={debugLogs} onExportLogs={exportLogs} onClearLogs={clearLogs} onOpenEmployee={() => setDashboardView("employee")} />}
+          ) : <Dashboard walletAddress={walletAddress} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} onOpenFunding={() => setShowFunding(true)} onReset={resetWallet} people={people} onAdd={() => { setEditingPerson(null); setEditorOpen(true); }} selectedId={selectedId} onSelect={setSelectedId} onSave={savePerson} onEdit={(person) => { setEditingPerson(person); setEditorOpen(true); }} onToggle={togglePlan} onPay={payInstallment} paymentMessage={paymentMessage} history={history} onExportLogs={exportLogs} onOpenEmployee={() => setDashboardView("employee")} />}
           {showFunding && <FundingModal onClose={() => setShowFunding(false)} />}
         </>
       )}
