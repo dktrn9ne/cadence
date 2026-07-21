@@ -31,6 +31,7 @@ npm.cmd run desktop:dev
 
 - Opens to a wallet-first consumer dashboard after unlock.
 - Unlocks an XRPL wallet locally from an XRPL family seed or BIP39 mnemonic phrase.
+- Verifies the derived wallet against an expected public `r...` address before continuing.
 - Reads the connected wallet's RLUSD trustline balance from XRPL mainnet.
 - Builds income verification from real `account_tx` ledger data for the connected wallet only.
 - Filters verified income to successful incoming RLUSD payments from the Cadence treasury/employer wallet with `SourceTag: 2606250005`.
@@ -72,6 +73,8 @@ If the desktop app opens to a stale screen, stop old Vite/Electron processes and
 If the app reports an RLUSD balance of zero, confirm the connected wallet is funded on XRPL mainnet and has an RLUSD trustline to the issuer above.
 
 If a BIP39 mnemonic fails, check the word spelling/order. If your secret starts with `s`, choose `Auto-detect wallet secret` or `XRPL family seed`.
+
+If a mnemonic opens a different wallet than expected, paste the wallet's public `r...` address into `Expected public wallet address` before connecting. Cadence checks common XRPL BIP39 derivation paths and signing algorithms and will refuse to continue unless it finds that exact address.
 
 ## Scripts
 

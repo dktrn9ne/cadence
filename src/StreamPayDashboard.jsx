@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Client, Wallet } from "xrpl";
+import { Client, ECDSA, Wallet } from "xrpl";
 
 const COLORS = {
   ink: "#24332d",
@@ -29,6 +29,17 @@ const ACCESS_METHODS = [
   { value: "family", label: "XRPL family seed", hint: "Usually starts with s" },
   { value: "mnemonic", label: "BIP39 mnemonic phrase", hint: "12, 15, 18, 21, or 24 words" },
 ];
+
+const MNEMONIC_DERIVATION_OPTIONS = Array.from({ length: 10 }, (_, index) => [
+  {
+    label: `XRPL account ${index + 1} / Ed25519`,
+    options: { derivationPath: `m/44'/144'/${index}'/0/0`, algorithm: ECDSA.ed25519 },
+  },
+  {
+    label: `XRPL account ${index + 1} / secp256k1`,
+    options: { derivationPath: `m/44'/144'/${index}'/0/0`, algorithm: ECDSA.secp256k1 },
+  },
+]).flat();
 
 const TIME_UNITS = {
   seconds15: { label: "15 seconds", seconds: 15 },
@@ -243,8 +254,9 @@ const isLikelyFamilySeed = (value) => {
   return /^s[1-9A-HJ-NP-Za-km-z]{20,}$/.test(phrase) && !/\s/.test(phrase);
 };
 
-const createWalletFromInput = (method, value) => {
+const createWalletFromInput = (method, value, expectedAddress = "") => {
   const phrase = value.trim();
+  const expected = expectedAddress.trim();
   if (!phrase) {
     throw new Error("Enter your wallet phrase to continue.");
   }
@@ -255,8 +267,13 @@ const createWalletFromInput = (method, value) => {
 
   if (selectedMethod === "family") {
     try {
-      return Wallet.fromSeed(phrase);
-    } catch {
+      const wallet = Wallet.fromSeed(phrase);
+      if (expected && wallet.address !== expected) {
+        throw new Error(`This family seed unlocks ${wallet.address}, not ${expected}. Check the wallet secret before continuing.`);
+      }
+      return wallet;
+    } catch (error) {
+      if (error?.message?.includes("not")) throw error;
       throw new Error("That does not look like a valid XRPL family seed. XRPL family seeds usually start with s.");
     }
   }
@@ -272,8 +289,25 @@ const createWalletFromInput = (method, value) => {
   }
 
   try {
-    return Wallet.fromMnemonic(normalizedMnemonic);
-  } catch {
+    const candidates = MNEMONIC_DERIVATION_OPTIONS.map((item) => {
+      try {
+        const wallet = Wallet.fromMnemonic(normalizedMnemonic, item.options);
+        return { ...item, wallet };
+      } catch {
+        return null;
+      }
+    }).filter(Boolean);
+
+    if (expected) {
+      const match = candidates.find((item) => item.wallet.address === expected);
+      if (match) return match.wallet;
+      const derived = candidates.slice(0, 6).map((item) => `${item.label}: ${item.wallet.address}`).join(" | ");
+      throw new Error(`This phrase did not derive ${expected}. First checked addresses: ${derived}`);
+    }
+
+    return candidates[0]?.wallet || Wallet.fromMnemonic(normalizedMnemonic);
+  } catch (error) {
+    if (error?.message?.includes("did not derive")) throw error;
     throw new Error("Unable to parse this as a BIP39 mnemonic. Check the spelling and word order, or use XRPL family seed if your secret starts with s.");
   }
 };
@@ -442,7 +476,7 @@ function Field({ label, children, help }) {
   );
 }
 
-function Intro({ method, setMethod, accessInput, setAccessInput, onSubmit, error }) {
+function Intro({ method, setMethod, accessInput, setAccessInput, expectedAddress, setExpectedAddress, onSubmit, error }) {
   const activeMethod = ACCESS_METHODS.find((item) => item.value === method);
   return (
     <div className="center-screen intro-screen">
@@ -474,6 +508,17 @@ function Intro({ method, setMethod, accessInput, setAccessInput, onSubmit, error
               }}
             />
           </Field>
+          <Field label="Expected public wallet address" help="Recommended for filming. Cadence will only continue if the phrase unlocks this exact XRPL address.">
+            <input
+              value={expectedAddress}
+              onChange={(event) => setExpectedAddress(event.target.value)}
+              autoComplete="off"
+              placeholder="r..."
+              onKeyDown={(event) => {
+                if (event.key === "Enter") onSubmit();
+              }}
+            />
+          </Field>
           {error && <div className="error-message">{error}</div>}
           <Button onClick={onSubmit}>Connect wallet <span>{">"}</span></Button>
         </div>
@@ -483,7 +528,7 @@ function Intro({ method, setMethod, accessInput, setAccessInput, onSubmit, error
   );
 }
 
-function WalletSetup({ method, setMethod, accessInput, setAccessInput, onSubmit, error }) {
+function WalletSetup({ method, setMethod, accessInput, setAccessInput, expectedAddress, setExpectedAddress, onSubmit, error }) {
   const activeMethod = ACCESS_METHODS.find((item) => item.value === method);
   return (
     <div className="center-screen setup-screen">
@@ -508,6 +553,14 @@ function WalletSetup({ method, setMethod, accessInput, setAccessInput, onSubmit,
               type="password"
               autoComplete="off"
               placeholder={`Enter ${activeMethod.hint.toLowerCase()}`}
+            />
+          </Field>
+          <Field label="Expected public wallet address" help="Cadence will verify that the secret unlocks this exact address before continuing.">
+            <input
+              value={expectedAddress}
+              onChange={(event) => setExpectedAddress(event.target.value)}
+              autoComplete="off"
+              placeholder="r..."
             />
           </Field>
         </div>
@@ -952,6 +1005,7 @@ export default function CadenceDashboard() {
   const [screen, setScreen] = useState("intro");
   const [method, setMethod] = useState("auto");
   const [accessInput, setAccessInput] = useState("");
+  const [expectedAddress, setExpectedAddress] = useState("");
   const [walletAddress, setWalletAddress] = useState("");
   const [rlusdBalance, setRlusdBalance] = useState(0);
   const [balanceLoading, setBalanceLoading] = useState(false);
@@ -1047,7 +1101,7 @@ export default function CadenceDashboard() {
     });
 
     try {
-      const wallet = createWalletFromInput(method, accessInput);
+      const wallet = createWalletFromInput(method, accessInput, expectedAddress);
       setSetupError("");
       setSigningWallet(wallet);
       setWalletAddress(wallet.address);
@@ -1233,6 +1287,7 @@ export default function CadenceDashboard() {
     logEvent("wallet.reset", { previousWallet: walletAddress ? shortAddress(walletAddress) : "none", peopleCount: people.length });
     setScreen("intro");
     setAccessInput("");
+    setExpectedAddress("");
     setWalletAddress("");
     setRlusdBalance(0);
     setSigningWallet(null);
@@ -1485,8 +1540,8 @@ export default function CadenceDashboard() {
           .person-amount { display: none; }
         }
       `}</style>
-      {screen === "intro" && <Intro method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} onSubmit={finishSetup} error={setupError} />}
-      {screen === "setup" && <WalletSetup method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} onSubmit={finishSetup} error={setupError} />}
+      {screen === "intro" && <Intro method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} expectedAddress={expectedAddress} setExpectedAddress={setExpectedAddress} onSubmit={finishSetup} error={setupError} />}
+      {screen === "setup" && <WalletSetup method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} expectedAddress={expectedAddress} setExpectedAddress={setExpectedAddress} onSubmit={finishSetup} error={setupError} />}
       {screen === "dashboard" && (
         <>
           {editorOpen ? (
