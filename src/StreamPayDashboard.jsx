@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import crossmark from "@crossmarkio/sdk";
 import { Client, ECDSA, Wallet } from "xrpl";
 
 const COLORS = {
@@ -19,17 +18,20 @@ const COLORS = {
 const RLUSD_CURRENCY = "524C555344000000000000000000000000000000";
 const RLUSD_ISSUER = "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De";
 const CADENCE_EMPLOYER_WALLET = "rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864";
-const CADENCE_TREASURY_WALLET = "rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864";
-const STREAM_FEE_RATE = 0.015;
 const SOURCE_TAG = 2606250005;
 const LOG_STORAGE_KEY = "cadence-debug-logs-v1";
 const MAX_LOGS = 500;
 
 const ACCESS_METHODS = [
-  { value: "auto", label: "Auto-detect wallet secret", hint: "Family seed or BIP39 phrase" },
-  { value: "family", label: "XRPL family seed", hint: "Usually starts with s" },
   { value: "mnemonic", label: "BIP39 mnemonic phrase", hint: "12, 15, 18, 21, or 24 words" },
+  { value: "family", label: "XRPL family seed", hint: "Usually starts with s" },
 ];
+
+const isLocalDesktopApp = () =>
+  typeof window !== "undefined" && (
+    new URLSearchParams(window.location.search).get("desktop") === "1" ||
+    /Electron|CadenceDesktop/i.test(window.navigator?.userAgent || "")
+  );
 
 const MNEMONIC_DERIVATION_OPTIONS = Array.from({ length: 10 }, (_, index) => [
   {
@@ -280,7 +282,7 @@ const createWalletFromInput = (method, value, expectedAddress = "") => {
   }
 
   if (isLikelyFamilySeed(phrase)) {
-    throw new Error("This looks like an XRPL family seed. Choose Auto-detect wallet secret or XRPL family seed instead of BIP39 mnemonic phrase.");
+    throw new Error("This looks like an XRPL family seed. Choose XRPL family seed instead of BIP39 mnemonic phrase.");
   }
 
   const normalizedMnemonic = normalizeMnemonic(phrase);
@@ -337,7 +339,15 @@ const responseHash = (response) =>
   response?.hash ||
   null;
 
+const getCrossmark = async () => {
+  const module = await import("@crossmarkio/sdk");
+  return module.default || module;
+};
+
+const getXrplConnect = async () => import("@textrp/xrpl-connect");
+
 const connectCrossmarkWallet = async () => {
+  const crossmark = await getCrossmark();
   const detected = await crossmark.async.detect(2000);
   if (!detected && !crossmark.sync.isInstalled?.()) {
     throw new Error("Crossmark was not detected. Install or unlock Crossmark, then try again.");
@@ -356,27 +366,23 @@ const connectCrossmarkWallet = async () => {
   return { address, signIn };
 };
 
-const submitCrossmarkRlusdPayment = async ({ account, destination, amount, feeAmount = "0" }) => {
+const submitCrossmarkRlusdPayment = async ({ account, destination, amount }) => {
+  const crossmark = await getCrossmark();
   const payment = buildCrossmarkRlusdPayment({ account, destination, amount });
   const result = await crossmark.async.signAndSubmitAndWait(payment);
-  let fee = null;
-  let feeError = null;
-  if (Number(feeAmount) > 0 && destination !== CADENCE_TREASURY_WALLET) {
-    try {
-      const feePayment = buildCrossmarkRlusdPayment({
-        account,
-        destination: CADENCE_TREASURY_WALLET,
-        amount: feeAmount,
-      });
-      fee = await crossmark.async.signAndSubmitAndWait(feePayment);
-    } catch (error) {
-      feeError = error;
-    }
-  }
-  return { result, hash: responseHash(result), transaction: payment, fee, feeError };
+  return { result, hash: responseHash(result), transaction: payment };
 };
 
-const submitRlusdPayment = async ({ wallet, destination, amount, feeAmount = "0" }) => {
+const submitXrplConnectRlusdPayment = async ({ manager, account, destination, amount }) => {
+  if (!manager?.connected) {
+    throw new Error("Connect an XRPL wallet first.");
+  }
+  const payment = buildCrossmarkRlusdPayment({ account, destination, amount });
+  const result = await manager.signAndSubmit(payment);
+  return { result, hash: responseHash(result), transaction: payment };
+};
+
+const submitRlusdPayment = async ({ wallet, destination, amount }) => {
   const client = new Client("wss://s1.ripple.com");
   await client.connect();
   try {
@@ -384,24 +390,7 @@ const submitRlusdPayment = async ({ wallet, destination, amount, feeAmount = "0"
     const prepared = await client.autofill(transaction);
     const signed = wallet.sign(prepared);
     const result = await client.submitAndWait(signed.tx_blob);
-    let fee = null;
-    let feeError = null;
-    if (Number(feeAmount) > 0 && destination !== CADENCE_TREASURY_WALLET) {
-      try {
-        const feeTransaction = buildRlusdPayment({
-          wallet,
-          destination: CADENCE_TREASURY_WALLET,
-          amount: feeAmount,
-        });
-        const preparedFee = await client.autofill(feeTransaction);
-        const signedFee = wallet.sign(preparedFee);
-        const feeResult = await client.submitAndWait(signedFee.tx_blob);
-        fee = { result: feeResult, hash: signedFee.hash, transaction: feeTransaction };
-      } catch (error) {
-        feeError = error;
-      }
-    }
-    return { result, hash: signed.hash, transaction, fee, feeError };
+    return { result, hash: signed.hash, transaction };
   } finally {
     await client.disconnect();
   }
@@ -438,9 +427,6 @@ const getSchedule = (person) => {
   const frequency = TIME_UNITS[person.frequency] || TIME_UNITS.minute;
   const payments = Math.max(1, Math.floor(TIME_UNITS.week.seconds / frequency.seconds));
   const perPayment = weeklyPay / payments;
-  const streamFee = perPayment * STREAM_FEE_RATE;
-  const weeklyStreamFee = weeklyPay * STREAM_FEE_RATE;
-  const totalPerPayment = perPayment + streamFee;
 
   return {
     total: weeklyPay,
@@ -450,9 +436,7 @@ const getSchedule = (person) => {
     weeklyPay,
     payments,
     perPayment,
-    streamFee,
-    weeklyStreamFee,
-    totalPerPayment,
+    totalPerPayment: perPayment,
     weeklyEquivalent: weeklyPay,
     frequencyLabel: frequency.label,
     frequencySeconds: frequency.seconds,
@@ -528,7 +512,15 @@ function Field({ label, children, help }) {
   );
 }
 
-function Intro({ method, setMethod, accessInput, setAccessInput, expectedAddress, setExpectedAddress, onSubmit, error }) {
+function Intro({ method, setMethod, accessInput, setAccessInput, expectedAddress, setExpectedAddress, onSubmit, error, isLocal, connectorRef, xrplManager }) {
+  const [showWalletSecret, setShowWalletSecret] = useState(false);
+
+  useEffect(() => {
+    if (!isLocal && connectorRef?.current && xrplManager) {
+      connectorRef.current.setWalletManager(xrplManager);
+    }
+  }, [connectorRef, isLocal, xrplManager]);
+
   return (
     <div className="center-screen intro-screen">
       <div className="intro-decoration decoration-one" />
@@ -536,16 +528,62 @@ function Intro({ method, setMethod, accessInput, setAccessInput, expectedAddress
       <div className="intro-card">
         <Brand />
         <div className="intro-sun">*</div>
-        <p className="eyebrow">Connect with Crossmark</p>
-        <h1>Your wallet,<br /><em>exactly as selected.</em></h1>
+        <p className="eyebrow">{isLocal ? "Import wallet" : "Connect XRPL wallet"}</p>
+        <h1>{isLocal ? <>Your wallet,<br /><em>imported locally.</em></> : <>Your wallet,<br /><em>exactly as selected.</em></>}</h1>
         <p className="intro-copy">
-          Cadence connects to the active Crossmark wallet, reads real RLUSD income, and sends payments for approval in Crossmark.
+          {isLocal
+            ? "Cadence unlocks the local app with a BIP39 mnemonic seed phrase or XRPL family seed, then signs payments on this device."
+            : "Cadence connects through XRPL Connect so you can use supported XRP wallets including Xaman, Crossmark, GemWallet, and Xyra."}
         </p>
-        <div className="intro-connect-form">
+        <form className="intro-connect-form" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
           {error && <div className="error-message">{error}</div>}
-          <Button onClick={onSubmit}>Connect Crossmark <span>{">"}</span></Button>
+          {isLocal && (
+            <>
+              <Field label="Wallet import type">
+                <select value={method} onChange={(event) => setMethod(event.target.value)}>
+                  {ACCESS_METHODS.map((item) => <option value={item.value} key={item.value}>{item.label} - {item.hint}</option>)}
+                </select>
+              </Field>
+              <Field label="Mnemonic seed phrase or family seed">
+                <div className="secret-input-wrap">
+                  <input
+                    type={showWalletSecret ? "text" : "password"}
+                    value={accessInput}
+                    onChange={(event) => setAccessInput(event.target.value)}
+                    placeholder="12/24 words or s..."
+                    autoComplete="off"
+                    spellCheck="false"
+                  />
+                  <button
+                    type="button"
+                    className="secret-toggle"
+                    onClick={() => setShowWalletSecret((showing) => !showing)}
+                  >
+                    {showWalletSecret ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </Field>
+              <Field label="Expected public address" help="Optional. Use this to confirm the secret opens the intended r... wallet.">
+                <input value={expectedAddress} onChange={(event) => setExpectedAddress(event.target.value)} placeholder="r..." autoComplete="off" spellCheck="false" />
+              </Field>
+            </>
+          )}
+          {!isLocal && (
+            <xrpl-wallet-connector
+              ref={connectorRef}
+              class="xrpl-connector"
+              wallets="xaman,crossmark,gemwallet,xyra"
+              primary-wallet="xaman"
+              background-color="#fffdf8"
+            />
+          )}
+          <Button type="submit">{isLocal ? "Import wallet" : "Connect XRPL wallet"} <span>{">"}</span></Button>
+        </form>
+        <div className="intro-note">
+          {isLocal
+            ? "The desktop app only offers mnemonic seed phrase or XRPL family seed import. Crossmark is reserved for the web version."
+            : "Cadence never asks for your seed phrase in the web flow. Your connected XRPL wallet signs each transaction request."}
         </div>
-        <div className="intro-note">Cadence never asks for your seed phrase in the consumer flow. Crossmark signs each transaction request.</div>
       </div>
     </div>
   );
@@ -617,10 +655,8 @@ function ScheduleSummary({ person }) {
   return (
     <div className="schedule-summary">
       <div><span className="summary-label">Each payment</span><strong>{money(schedule.perPayment, 6)}</strong></div>
-      <div><span className="summary-label">1.5% stream fee</span><strong>{money(schedule.streamFee, 6)}</strong></div>
       <div><span className="summary-label">Payments per week</span><strong>{schedule.payments.toLocaleString()}</strong></div>
       <div><span className="summary-label">Weekly total</span><strong>{money(schedule.weeklyPay, 2)}</strong></div>
-      <div><span className="summary-label">Weekly fees</span><strong>{money(schedule.weeklyStreamFee, 2)}</strong></div>
     </div>
   );
 }
@@ -656,13 +692,13 @@ function PersonDetails({ person, onEdit, onToggle, onPay, walletReady, paymentMe
     <div className="details-card">
       <div className="details-top"><div className="large-avatar">{person.name.slice(0, 1).toUpperCase()}</div><div><p className="eyebrow">Selected person</p><h2>{person.name}</h2><p className="muted-line">{person.role || "No role added"} {person.email ? ` ${person.email}` : ""}</p></div><button className="text-button edit-button" onClick={onEdit}>Edit</button></div>
       <div className="address-line"><span>Destination</span><code>{shortAddress(person.address)}</code></div>
-      <div className="detail-highlight"><div><span className="eyebrow">Weekly pay</span><strong>{money(schedule.weeklyPay)}</strong><small>recipient amount across 1 week</small></div><div className="highlight-arrow">+</div><div><span className="eyebrow">Each payout</span><strong>{money(schedule.perPayment, 6)}</strong><small>{money(schedule.streamFee, 6)} treasury fee</small></div></div>
-      <div className="plan-meter"><div><span>Installments sent</span><strong>{paidCount} / {schedule.payments.toLocaleString()}</strong></div><div><span>Next send</span><strong>{nextRun}</strong></div><div><span>Total debit</span><strong>{money(schedule.totalPerPayment, 6)}</strong></div><div><span>Fee treasury</span><strong>{shortAddress(CADENCE_TREASURY_WALLET)}</strong></div><div><span>Source tag</span><strong>{SOURCE_TAG}</strong></div></div>
+      <div className="detail-highlight"><div><span className="eyebrow">Weekly pay</span><strong>{money(schedule.weeklyPay)}</strong><small>recipient amount across 1 week</small></div><div className="highlight-arrow">{">"}</div><div><span className="eyebrow">Each payout</span><strong>{money(schedule.perPayment, 6)}</strong><small>sent directly to the destination wallet</small></div></div>
+      <div className="plan-meter"><div><span>Installments sent</span><strong>{paidCount} / {schedule.payments.toLocaleString()}</strong></div><div><span>Next send</span><strong>{nextRun}</strong></div><div><span>Recipient debit</span><strong>{money(schedule.totalPerPayment, 6)}</strong></div><div><span>Source tag</span><strong>{SOURCE_TAG}</strong></div></div>
       <div className="details-actions"><Button kind={person.active ? "secondary" : "primary"} onClick={onToggle}>{person.active ? "Pause plan" : "Start plan"}</Button><Button kind="secondary" onClick={onPay} disabled={!walletReady || !person.address.startsWith("r")}>Pay one installment</Button></div>
-      {!walletReady && <p className="inline-note">Connect Crossmark first to make an on-chain payment.</p>}
+      {!walletReady && <p className="inline-note">Connect a wallet first to make an on-chain payment.</p>}
       {walletReady && !person.address.startsWith("r") && <p className="inline-note">Add a public XRPL destination address before paying.</p>}
       {paymentMessage && <div className="success-message">{paymentMessage}</div>}
-      <div className="safe-payment-note"><span>?</span> Cadence sends the recipient payment plus a 1.5% RLUSD stream fee to the treasury wallet. Your wallet may ask you to confirm both on-chain payments.</div>
+      <div className="safe-payment-note"><span>?</span> Cadence submits one RLUSD payment per interval to the designated destination wallet. Scheduled plans continue until all weekly installments have been sent or you pause the plan.</div>
     </div>
   );
 }
@@ -821,7 +857,7 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
   const employee = people.find((person) => person.active) || people[0] || samplePerson;
   const schedule = getSchedule({ ...employee, frequency: employee.frequency || "seconds15" });
   const [withdrawn, setWithdrawn] = useState(false);
-  const [employeeView, setEmployeeView] = useState("proof");
+  const [employeeView, setEmployeeView] = useState("dashboard");
   const [employeeProofData, setEmployeeProofData] = useState(null);
   const [employeeProofLoading, setEmployeeProofLoading] = useState(false);
   const [employeeProofError, setEmployeeProofError] = useState("");
@@ -880,7 +916,7 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
         <Brand compact />
         <div className="topbar-right">
           <div className="wallet-chip"><span className="online-dot" />{shortAddress(walletAddress || employee.address)}</div>
-          <Button kind="ghost" onClick={onBack}>Manage payments</Button>
+          <Button kind="ghost" onClick={onBack}>Employer dashboard</Button>
           <Button kind="ghost" onClick={() => setEmployeeView("proof")}>Income proof</Button>
           <Button kind="ghost" onClick={onExportLogs}>Support file</Button>
           <Button kind="ghost" onClick={onReset}>Change wallet</Button>
@@ -937,7 +973,7 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
         <section className="employee-card employee-history-card">
           <div className="card-heading">
             <div><p className="eyebrow">Payment history</p><h2>Recent RLUSD received</h2></div>
-            <span className="employee-live-tag">{incomeRows.slice(0, 8).length} shown</span>
+            <div className="card-actions"><span className="employee-live-tag">{incomeRows.slice(0, 8).length} shown</span><Button kind="secondary" onClick={() => setEmployeeView("proof")}>Open income proof</Button></div>
           </div>
           <div className="employee-table-wrap">
             <table className="employee-table">
@@ -965,14 +1001,21 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
 
 function Dashboard({ walletAddress, walletProvider, rlusdBalance, balanceLoading, onRefreshBalance, onOpenFunding, onReset, people, onAdd, selectedId, onSelect, onSave, onEdit, onToggle, onPay, paymentMessage, history, onExportLogs, onOpenEmployee }) {
   const selectedPerson = people.find((person) => person.id === selectedId);
-  const walletReady = Boolean(walletProvider === "crossmark" && walletAddress?.startsWith("r"));
+  const walletReady = Boolean((walletProvider === "xrplconnect" || walletProvider === "local") && walletAddress?.startsWith("r"));
+  const providerLabel = walletProvider === "xrplconnect" ? "XRPL wallet" : "Local wallet";
+  const signingCopy = walletProvider === "xrplconnect"
+    ? "Create payment plans, review each destination, and confirm each transaction in the connected XRPL wallet."
+    : "Create payment plans, review each destination, and sign each transaction with the imported local wallet.";
+  const payerCopy = walletProvider === "xrplconnect"
+    ? "This is the active XRPL Connect wallet. Cadence never stores a seed phrase."
+    : "This wallet was imported from a mnemonic seed phrase or XRPL family seed for local signing.";
   return (
     <div className="app-shell">
-      <header className="topbar"><Brand compact /><div className="topbar-right"><div className="wallet-chip"><span className="online-dot" />{shortAddress(walletAddress)}</div><Button kind="ghost" onClick={onOpenEmployee}>Wallet dashboard</Button><Button kind="ghost" onClick={onExportLogs}>Support file</Button><Button kind="ghost" onClick={onReset}>Change wallet</Button></div></header>
+      <header className="topbar"><Brand compact /><div className="topbar-right"><div className="wallet-chip"><span className="online-dot" />{shortAddress(walletAddress)}</div><Button kind="ghost" onClick={onOpenEmployee}>Employee dashboard</Button><Button kind="ghost" onClick={onExportLogs}>Support file</Button><Button kind="ghost" onClick={onReset}>Change wallet</Button></div></header>
       <main className="dashboard-content">
-        <div className="welcome-row"><div><p className="eyebrow">Payment management</p><h1>Send RLUSD with confidence</h1><p className="muted-line">Create payment plans, review each destination, and confirm each transaction in Crossmark.</p></div><div className="live-pill"><span className="online-dot" />Crossmark connected</div></div>
+        <div className="welcome-row"><div><p className="eyebrow">Employer dashboard</p><h1>Send RLUSD with confidence</h1><p className="muted-line">{signingCopy}</p></div><div className="live-pill"><span className="online-dot" />{providerLabel} connected</div></div>
         <section className="balance-card"><div><p className="eyebrow">Available balance RLUSD</p><div className="balance-number">{money(rlusdBalance, 2)}</div><p className="muted-line">{walletAddress ? shortAddress(walletAddress) : "No wallet connected"}</p></div><div className="balance-actions"><Button kind="secondary" onClick={onRefreshBalance} disabled={balanceLoading}>{balanceLoading ? "Reading..." : "Refresh balance"}</Button>{rlusdBalance <= 0 && <Button kind="soft" onClick={onOpenFunding}>Add RLUSD</Button>}</div></section>
-        <section className="payer-strip"><div><p className="eyebrow">Payment wallet</p><strong>{shortAddress(walletAddress)}</strong><span>This is the active Crossmark wallet. Cadence never stores a seed phrase.</span></div><Button kind="secondary" onClick={onReset}>Change wallet</Button></section>
+        <section className="payer-strip"><div><p className="eyebrow">Payment wallet</p><strong>{shortAddress(walletAddress)}</strong><span>{payerCopy}</span></div><Button kind="secondary" onClick={onReset}>Change wallet</Button></section>
         <div className="content-grid"><PeopleList people={people} selectedId={selectedId} onSelect={onSelect} onAdd={onAdd} />{selectedPerson ? <PersonDetails person={selectedPerson} onEdit={() => onEdit(selectedPerson)} onToggle={() => onToggle(selectedPerson.id)} onPay={() => onPay(selectedPerson)} walletReady={walletReady} paymentMessage={paymentMessage} /> : <div className="details-card details-empty"><div className="empty-sun">*</div><h2>Add a recipient to begin.</h2><p>Create a payment plan with a verified XRPL destination address before sending RLUSD.</p><Button onClick={onAdd}>Create payment plan</Button></div>}</div>
         <section className="history-panel"><div className="card-heading"><div><p className="eyebrow">Payment activity</p><h2>Recent actions</h2></div><Button kind="small" onClick={onExportLogs}>Download support file</Button></div>{history.length === 0 ? <p className="muted-line">No payment activity yet.</p> : <div className="history-list">{history.slice(0, 8).map((item) => <div className={`history-row ${item.status}`} key={item.id}><div><b>{item.title}</b><span>{item.detail}</span></div><time>{new Date(item.at).toLocaleString()}</time></div>)}</div>}</section>
         <p className="footer-note">RLUSD is a dollar-denominated token on the XRP Ledger. Network fees, issuer details, and wallet confirmations should always be checked before sending.</p>
@@ -983,7 +1026,7 @@ function Dashboard({ walletAddress, walletProvider, rlusdBalance, balanceLoading
 
 export default function CadenceDashboard() {
   const [screen, setScreen] = useState("intro");
-  const [method, setMethod] = useState("auto");
+  const [method, setMethod] = useState("mnemonic");
   const [accessInput, setAccessInput] = useState("");
   const [expectedAddress, setExpectedAddress] = useState("");
   const [walletAddress, setWalletAddress] = useState("");
@@ -1000,8 +1043,12 @@ export default function CadenceDashboard() {
   const [paymentMessage, setPaymentMessage] = useState("");
   const [history, setHistory] = useState([]);
   const [debugLogs, setDebugLogs] = useState(loadStoredLogs);
-  const [dashboardView, setDashboardView] = useState("employee");
+  const [dashboardView, setDashboardView] = useState("employer");
   const autoPayingRef = useRef(false);
+  const xrplConnectorRef = useRef(null);
+  const xrplConnectManagerRef = useRef(null);
+  const [xrplConnectManager, setXrplConnectManager] = useState(null);
+  const localDesktop = useMemo(() => isLocalDesktopApp(), []);
 
   const selectedPerson = useMemo(() => people.find((person) => person.id === selectedId), [people, selectedId]);
 
@@ -1053,11 +1100,12 @@ export default function CadenceDashboard() {
     console.info("[Cadence] logs.cleared");
   };
 
-  const refreshBalance = async (address = walletAddress) => {
+  const refreshBalance = async (address = walletAddress, options = {}) => {
+    const showFundingWhenEmpty = options.showFundingWhenEmpty ?? true;
     logEvent("balance.refresh.started", { address: address ? shortAddress(address) : "none" });
     if (!address || !address.startsWith("r")) {
       setRlusdBalance(0);
-      setShowFunding(true);
+      if (showFundingWhenEmpty) setShowFunding(true);
       logEvent("balance.refresh.skipped", { reason: "missing_or_invalid_public_address" });
       return;
     }
@@ -1065,7 +1113,7 @@ export default function CadenceDashboard() {
     try {
       const balance = await readRlusdBalance(address);
       setRlusdBalance(balance);
-      if (balance <= 0) setShowFunding(true);
+      if (balance <= 0 && showFundingWhenEmpty) setShowFunding(true);
       logEvent("balance.refresh.success", { address: shortAddress(address), balance });
     } catch (error) {
       setSetupError(error?.message || "Could not read the RLUSD balance.");
@@ -1075,27 +1123,108 @@ export default function CadenceDashboard() {
     }
   };
 
+  const handleConnectedXrplAccount = async (account, walletId = "xrplconnect") => {
+    if (!account?.address?.startsWith("r")) {
+      throw new Error("XRPL Connect did not return a valid XRPL address.");
+    }
+    setSetupError("");
+    setSigningWallet(null);
+    setWalletProvider("xrplconnect");
+    setWalletAddress(account.address);
+    setDashboardView("employer");
+    setScreen("dashboard");
+    logEvent("wallet.setup.success", {
+      method: "xrplconnect",
+      walletId,
+      walletAddress: shortAddress(account.address),
+    });
+    await refreshBalance(account.address, { showFundingWhenEmpty: false });
+  };
+
+  const ensureXrplConnectManager = async () => {
+    if (xrplConnectManagerRef.current) {
+      return xrplConnectManagerRef.current;
+    }
+
+    const {
+      WalletManager,
+      XamanAdapter,
+      CrossmarkAdapter,
+      GemWalletAdapter,
+      XyraAdapter,
+    } = await getXrplConnect();
+
+    const manager = new WalletManager({
+      adapters: [
+        new XamanAdapter(),
+        new CrossmarkAdapter(),
+        new GemWalletAdapter(),
+        new XyraAdapter(),
+      ],
+      network: "mainnet",
+      autoConnect: false,
+    });
+
+    manager.on("connect", (account) => {
+      handleConnectedXrplAccount(account, manager.wallet?.id || "xrplconnect").catch((error) => {
+        setSetupError(error?.message || "Could not connect XRPL wallet.");
+        logEvent("wallet.setup.failed", { method: "xrplconnect", error });
+      });
+    });
+
+    manager.on("accountChanged", (account) => {
+      handleConnectedXrplAccount(account, manager.wallet?.id || "xrplconnect").catch((error) => {
+        setSetupError(error?.message || "Could not update XRPL wallet.");
+        logEvent("wallet.account_changed.failed", { method: "xrplconnect", error });
+      });
+    });
+
+    manager.on("disconnect", () => {
+      resetWallet();
+    });
+
+    xrplConnectManagerRef.current = manager;
+    setXrplConnectManager(manager);
+    return manager;
+  };
+
   const finishSetup = async () => {
     logEvent("wallet.setup.submitted", {
-      method,
-      accessLength: accessInput.trim().length,
+      method: localDesktop ? method : "xrplconnect",
+      accessLength: localDesktop ? accessInput.trim().length : 0,
+      runtime: localDesktop ? "desktop" : "web",
     });
 
     try {
-      const wallet = await connectCrossmarkWallet();
-      setSetupError("");
-      setSigningWallet(null);
-      setWalletProvider("crossmark");
-      setWalletAddress(wallet.address);
-      setDashboardView("employee");
-      setScreen("dashboard");
-      logEvent("wallet.setup.success", { method: "crossmark", walletAddress: shortAddress(wallet.address) });
-      await refreshBalance(wallet.address);
+      if (localDesktop) {
+        const wallet = createWalletFromInput(method, accessInput, expectedAddress);
+        setSetupError("");
+        setSigningWallet(wallet);
+        setWalletProvider("local");
+        setWalletAddress(wallet.address);
+        setDashboardView("employer");
+        setScreen("dashboard");
+        logEvent("wallet.setup.success", { method, runtime: "desktop", walletAddress: shortAddress(wallet.address) });
+        await refreshBalance(wallet.address, { showFundingWhenEmpty: false });
+        return;
+      }
+
+      const manager = await ensureXrplConnectManager();
+      if (manager.connected && manager.account?.address) {
+        await handleConnectedXrplAccount(manager.account, manager.wallet?.id || "xrplconnect");
+        return;
+      }
+      const connector = xrplConnectorRef.current;
+      if (!connector) {
+        throw new Error("XRPL Connect is still loading. Try again in a moment.");
+      }
+      connector.setWalletManager(manager);
+      await connector.open();
     } catch (error) {
       setSigningWallet(null);
       setWalletProvider("");
-      setSetupError(error?.message || "Could not connect Crossmark.");
-      logEvent("wallet.setup.failed", { method: "crossmark", error });
+      setSetupError(error?.message || (localDesktop ? "Could not import wallet." : "Could not connect XRPL wallet."));
+      logEvent("wallet.setup.failed", { method: localDesktop ? method : "xrplconnect", runtime: localDesktop ? "desktop" : "web", error });
     }
   };
 
@@ -1115,8 +1244,6 @@ export default function CadenceDashboard() {
       payMode: next.payMode,
       weeklyPay: schedule.weeklyPay,
       perPayment: schedule.perPayment,
-      streamFee: schedule.streamFee,
-      treasury: shortAddress(CADENCE_TREASURY_WALLET),
       frequency: schedule.frequencyLabel,
       paymentsPerWeek: schedule.payments,
     });
@@ -1134,15 +1261,15 @@ export default function CadenceDashboard() {
       return;
     }
 
-    const ready = Boolean((walletProvider === "crossmark" || signingWallet) && person.address?.startsWith("r"));
+    const ready = Boolean((walletProvider === "xrplconnect" || signingWallet) && person.address?.startsWith("r"));
     setPeople((current) => current.map((item) => item.id === id ? { ...item, active: true, nextRunAt: ready ? Date.now() : null } : item));
-    setPaymentMessage(ready ? `${person.name}'s plan started. First payment prompt is opening.` : `${person.name}'s plan started. Connect Crossmark and add a destination address to send payments.`);
+    setPaymentMessage(ready ? `${person.name}'s plan started. First payment prompt is opening.` : `${person.name}'s plan started. Connect a wallet and add a destination address to send payments.`);
     addHistoryItem(setHistory, { status: ready ? "success" : "waiting", title: "Plan started", detail: ready ? `${person.name} - first payment queued now` : `${person.name} - waiting for payer wallet and destination` });
     logEvent("plan.started", {
       id: person.id,
       name: person.name,
       ready,
-      hasSigningWallet: Boolean(walletProvider === "crossmark" || signingWallet),
+      hasSigningWallet: Boolean(walletProvider === "xrplconnect" || signingWallet),
       hasDestination: Boolean(person.address?.startsWith("r")),
       schedule: getSchedule(person),
     });
@@ -1159,8 +1286,6 @@ export default function CadenceDashboard() {
       paidCount,
       plannedPayments: schedule.payments,
       perPayment: schedule.perPayment,
-      streamFee: schedule.streamFee,
-      treasury: shortAddress(CADENCE_TREASURY_WALLET),
       sourceTag: SOURCE_TAG,
       payer: walletAddress ? shortAddress(walletAddress) : "none",
       destination: person.address ? shortAddress(person.address) : "none",
@@ -1173,69 +1298,55 @@ export default function CadenceDashboard() {
       return;
     }
 
-    if (!(walletProvider === "crossmark" || signingWallet) || !person.address?.startsWith("r")) {
+    if (!(walletProvider === "xrplconnect" || signingWallet) || !person.address?.startsWith("r")) {
       setPaymentMessage(`${person.name} needs a connected wallet and destination address.`);
       addHistoryItem(setHistory, { status: "waiting", title: "Payment waiting", detail: `${person.name} needs a connected wallet and destination address.` });
       logEvent("payment.installment.blocked", {
         reason: "missing_wallet_or_destination",
-        hasSigningWallet: Boolean(walletProvider === "crossmark" || signingWallet),
+        hasSigningWallet: Boolean(walletProvider === "xrplconnect" || signingWallet),
         hasDestination: Boolean(person.address?.startsWith("r")),
       });
       return;
     }
 
-    setPaymentMessage(walletProvider === "crossmark" ? "Confirm the installment and stream fee in Crossmark..." : "Signing and submitting the installment and stream fee from the connected wallet...");
-    addHistoryItem(setHistory, { status: "waiting", title: source === "manual" ? "Manual payment started" : "Scheduled payment started", detail: `${person.name} - ${money(schedule.perPayment, 4)} plus ${money(schedule.streamFee, 6)} fee - source tag ${SOURCE_TAG}` });
+    setPaymentMessage(walletProvider === "xrplconnect" ? "Confirm the installment in your XRPL wallet..." : "Signing and submitting the installment from the connected wallet...");
+    addHistoryItem(setHistory, { status: "waiting", title: source === "manual" ? "Manual payment started" : "Scheduled payment started", detail: `${person.name} - ${money(schedule.perPayment, 4)} - source tag ${SOURCE_TAG}` });
     logEvent("payment.local_signing.started", {
       transactionType: "Payment",
       account: shortAddress(walletAddress),
       destination: shortAddress(person.address),
-      treasury: shortAddress(CADENCE_TREASURY_WALLET),
       sourceTag: SOURCE_TAG,
       amount: tokenAmount(schedule.perPayment),
-      streamFee: tokenAmount(schedule.streamFee),
       issuer: RLUSD_ISSUER,
     });
     try {
-      const submitter = walletProvider === "crossmark" ? submitCrossmarkRlusdPayment : submitRlusdPayment;
-      const { result, hash, fee, feeError } = await submitter(walletProvider === "crossmark" ? {
+      const submitter = walletProvider === "xrplconnect" ? submitXrplConnectRlusdPayment : submitRlusdPayment;
+      const { result, hash } = await submitter(walletProvider === "xrplconnect" ? {
+        manager: xrplConnectManagerRef.current,
         account: walletAddress,
         destination: person.address,
         amount: tokenAmount(schedule.perPayment),
-        feeAmount: tokenAmount(schedule.streamFee),
       } : {
         wallet: signingWallet,
         destination: person.address,
         amount: tokenAmount(schedule.perPayment),
-        feeAmount: tokenAmount(schedule.streamFee),
       });
       const tx = result?.result || result || {};
       const txHash = hash || tx.hash;
-      const feeHash = fee?.hash || fee?.result?.result?.hash || fee?.result?.hash || null;
       const nextPaidCount = paidCount + 1;
       const complete = nextPaidCount >= schedule.payments;
-      const stopForFee = Boolean(feeError);
       setPeople((current) => current.map((item) => item.id === person.id ? {
         ...item,
         paidCount: nextPaidCount,
-        active: complete || stopForFee ? false : item.active,
-        nextRunAt: complete || stopForFee ? null : Date.now() + getFrequencyMs(item),
+        active: complete ? false : item.active,
+        nextRunAt: complete ? null : Date.now() + getFrequencyMs(item),
       } : item));
-      if (feeError) {
-        setPaymentMessage(`Recipient payment submitted, but the treasury fee failed. Plan paused. Payment: ${txHash?.slice(0, 10) || "submitted"}...`);
-        addHistoryItem(setHistory, { status: "failed", title: "Treasury fee not submitted", detail: `${person.name} received ${money(schedule.perPayment, 4)} but ${money(schedule.streamFee, 6)} fee failed. Payment hash ${txHash || "unavailable"}` });
-        logEvent("payment.fee_failed", { personId: person.id, name: person.name, hash: txHash || null, streamFee: schedule.streamFee, treasury: shortAddress(CADENCE_TREASURY_WALLET), error: feeError });
-        return;
-      }
-      setPaymentMessage(txHash ? `Payment submitted: ${txHash.slice(0, 10)}...${feeHash ? ` Fee: ${feeHash.slice(0, 10)}...` : ""}` : "Payment submitted.");
-      addHistoryItem(setHistory, { status: "success", title: complete ? "Final payment submitted" : "Payment submitted", detail: txHash ? `${person.name} - ${money(schedule.perPayment, 4)} + ${money(schedule.streamFee, 6)} fee - tag ${SOURCE_TAG} - ${txHash}${feeHash ? ` / fee ${feeHash}` : ""}` : `${person.name} - ${money(schedule.perPayment, 4)} + ${money(schedule.streamFee, 6)} fee - tag ${SOURCE_TAG}` });
+      setPaymentMessage(txHash ? `Payment submitted: ${txHash.slice(0, 10)}...` : "Payment submitted.");
+      addHistoryItem(setHistory, { status: "success", title: complete ? "Final payment submitted" : "Payment submitted", detail: txHash ? `${person.name} - ${money(schedule.perPayment, 4)} - tag ${SOURCE_TAG} - ${txHash}` : `${person.name} - ${money(schedule.perPayment, 4)} - tag ${SOURCE_TAG}` });
       logEvent("payment.submitted", {
         personId: person.id,
         name: person.name,
         hash: txHash || null,
-        feeHash,
-        streamFee: schedule.streamFee,
-        treasury: shortAddress(CADENCE_TREASURY_WALLET),
         nextPaidCount,
         complete,
         nextRunAt: complete ? null : Date.now() + getFrequencyMs(person),
@@ -1282,7 +1393,7 @@ export default function CadenceDashboard() {
     setSigningWallet(null);
     setWalletProvider("");
     setSetupError("");
-    setDashboardView("employee");
+    setDashboardView("employer");
   };
 
   return (
@@ -1315,6 +1426,7 @@ export default function CadenceDashboard() {
         .intro-note { margin-top: 20px; }
         .intro-connect-form { display: grid; gap: 14px; max-width: 390px; margin: 0 auto; text-align: left; }
         .intro-connect-form .button { width: 100%; }
+        .xrpl-connector { display: none; }
         .button { border: 0; border-radius: 12px; padding: 13px 18px; font-weight: 700; color: ${COLORS.ink}; transition: transform .15s ease, box-shadow .15s ease, background .15s ease; }
         .button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 18px rgba(52,63,53,.12); }
         .button-primary { background: ${COLORS.ink}; color: #fffdf8; }
@@ -1338,6 +1450,9 @@ export default function CadenceDashboard() {
         .field-help { color: ${COLORS.muted}; font-size: 10px; line-height: 1.4; }
         input, select { width: 100%; min-height: 43px; padding: 10px 12px; border: 1px solid ${COLORS.line}; border-radius: 10px; background: #fff; color: ${COLORS.ink}; outline: none; }
         input:focus, select:focus { border-color: ${COLORS.mintDark}; box-shadow: 0 0 0 3px rgba(185,221,203,.35); }
+        .secret-input-wrap { position: relative; }
+        .secret-input-wrap input { padding-right: 68px; }
+        .secret-toggle { position: absolute; right: 6px; top: 6px; min-height: 31px; padding: 0 10px; border: 1px solid ${COLORS.line}; border-radius: 8px; background: ${COLORS.card}; color: ${COLORS.mintDark}; font-size: 11px; font-weight: 700; }
         .setup-card .button { width: 100%; }
         .security-note { margin-top: 18px; line-height: 1.45; text-align: center; }
         .security-note span { color: ${COLORS.coralDark}; font-size: 15px; margin-right: 4px; }
@@ -1369,6 +1484,7 @@ export default function CadenceDashboard() {
         .people-card, .details-card, .editor-card { padding: 24px; border: 1px solid ${COLORS.line}; border-radius: 20px; background: ${COLORS.card}; }
         .card-heading { justify-content: space-between; gap: 12px; margin-bottom: 22px; }
         .card-heading h2 { font-size: 25px; margin: 0; }
+        .card-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
         .people-list { display: grid; gap: 7px; }
         .person-row { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto 8px; align-items: center; gap: 10px; width: 100%; padding: 11px; border: 1px solid transparent; border-radius: 14px; background: transparent; text-align: left; color: ${COLORS.ink}; }
         .person-row:hover, .person-row.selected { background: #f3f7f1; border-color: ${COLORS.mint}; }
@@ -1530,7 +1646,7 @@ export default function CadenceDashboard() {
           .person-amount { display: none; }
         }
       `}</style>
-      {screen === "intro" && <Intro method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} expectedAddress={expectedAddress} setExpectedAddress={setExpectedAddress} onSubmit={finishSetup} error={setupError} />}
+      {screen === "intro" && <Intro method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} expectedAddress={expectedAddress} setExpectedAddress={setExpectedAddress} onSubmit={finishSetup} error={setupError} isLocal={localDesktop} connectorRef={xrplConnectorRef} xrplManager={xrplConnectManager} />}
       {screen === "dashboard" && (
         <>
           {editorOpen ? (
