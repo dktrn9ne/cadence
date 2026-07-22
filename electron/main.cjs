@@ -3,6 +3,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 
 const devServerUrl = process.env.CADENCE_DEV_SERVER_URL;
+const desktopSearch = "desktop=1";
 const desktopLogPath = path.join(app.getPath("userData"), "cadence-renderer.log");
 
 function writeDesktopLog(message) {
@@ -41,11 +42,13 @@ function createWindow() {
   writeDesktopLog(`Cadence window created. Renderer log path: ${desktopLogPath}`);
 
   if (devServerUrl) {
-    window.loadURL(devServerUrl);
+    const url = new URL(devServerUrl);
+    url.searchParams.set("desktop", "1");
+    window.loadURL(url.toString(), { userAgent: `${window.webContents.getUserAgent()} CadenceDesktop` });
     return;
   }
 
-  window.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+  window.loadFile(path.join(__dirname, "..", "dist", "index.html"), { search: desktopSearch });
 }
 
 app.whenReady().then(() => {
