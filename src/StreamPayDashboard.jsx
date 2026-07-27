@@ -2,17 +2,19 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Client, ECDSA, Wallet } from "xrpl";
 
 const COLORS = {
-  ink: "#24332d",
-  muted: "#708078",
-  paper: "#fbf8f1",
-  card: "#fffdf8",
-  line: "#e7e2d7",
-  mint: "#b9ddcb",
-  mintDark: "#2e6956",
-  coral: "#e8896d",
-  coralDark: "#a8523d",
-  butter: "#f3dda4",
-  sky: "#bdd9e7",
+  ink: "#1F2D24",
+  ink2: "#162119",
+  muted: "#6D6A60",
+  paper: "#F6F1E6",
+  card: "#FFF9EC",
+  line: "#E4D8C1",
+  mint: "#EAD79A",
+  mintDark: "#1F2D24",
+  coral: "#D65A3A",
+  coralDark: "#B9492E",
+  butter: "#EAD79A",
+  stone: "#DCCDB2",
+  fog: "#8E8B83",
 };
 
 const RLUSD_CURRENCY = "524C555344000000000000000000000000000000";
@@ -486,15 +488,91 @@ const loadStoredLogs = () => {
 
 function Brand({ compact = false }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-      <div className="brand-mark">C</div>
+    <div className="brand-lockup">
+      <CadenceMark className="brand-mark" />
       <div>
-        <div style={{ fontFamily: "Georgia, serif", fontSize: compact ? 22 : 28, fontWeight: 700, letterSpacing: "-0.04em" }}>
-          Cadence
-        </div>
-        {!compact && <div style={{ color: COLORS.muted, fontSize: 12, marginTop: 2 }}>verified RLUSD income</div>}
+        <div className="brand-word" style={{ fontSize: compact ? 22 : 30 }}>Cadence</div>
+        <div className="brand-xrp">ON XRP</div>
+        {!compact && <div className="brand-tagline">Real-time payroll. Streaming income.</div>}
       </div>
     </div>
+  );
+}
+
+function CadenceMark({ className = "" }) {
+  return (
+    <span className={className} aria-hidden="true">
+      <svg viewBox="0 0 64 64" fill="none">
+        <path d="M44 16a20 20 0 1 0 0 32" />
+        <path d="M49 10a28 28 0 1 0 0 44" />
+        <path d="M39 24a11 11 0 1 0 0 16" />
+      </svg>
+    </span>
+  );
+}
+
+function BrandPattern({ variant = "wave" }) {
+  if (variant === "dots") return <div className="brand-pattern pattern-dots" aria-hidden="true" />;
+  if (variant === "rings") return <div className="brand-pattern pattern-rings" aria-hidden="true" />;
+  if (variant === "lines") return <div className="brand-pattern pattern-lines" aria-hidden="true" />;
+  return (
+    <div className="brand-pattern pattern-wave" aria-hidden="true">
+      <svg viewBox="0 0 1200 118" preserveAspectRatio="none">
+        <path d="M0 72 C130 92 238 92 360 66 S590 20 760 44 S1030 78 1200 46" />
+        <path d="M0 62 C130 84 242 86 365 62 S594 18 762 36 S1032 70 1200 38" />
+        <path d="M0 52 C132 76 246 80 370 58 S598 18 764 30 S1034 62 1200 32" />
+        <path d="M0 42 C134 68 250 72 375 54 S602 20 766 26 S1036 54 1200 28" />
+        <path d="M0 32 C136 58 254 64 380 50 S606 24 768 24 S1038 48 1200 28" />
+        <path d="M0 22 C138 50 258 54 385 46 S610 30 770 26 S1040 44 1200 34" />
+      </svg>
+    </div>
+  );
+}
+
+function StreamWidget({
+  label,
+  amount,
+  subcopy,
+  address,
+  primaryAction,
+  secondaryAction,
+  stats = [],
+  compact = false,
+}) {
+  const display = money(amount, 4);
+  const [whole, cents = "0000"] = display.replace("$", "").split(".");
+  return (
+    <section className={`stream-widget ${compact ? "stream-widget-compact" : ""}`}>
+      <div className="stream-widget-rings" aria-hidden="true" />
+      <div className="stream-top">
+        <div>
+          <p className="stream-label">{label}</p>
+          <div className="stream-amount">${whole}<span>.{cents}</span></div>
+          <p className="stream-subcopy">{subcopy}</p>
+        </div>
+        <div className="stream-live"><span className="online-dot" />Live</div>
+      </div>
+      <svg className="stream-wave" viewBox="0 0 400 64" preserveAspectRatio="none" aria-hidden="true">
+        <path className="stream-wave-base" d="M0,32 L400,32" />
+        <path className="stream-wave-line" d="M0,32 C65,36 110,36 150,32 C178,32 182,12 195,32 C205,49 214,49 226,32 C266,28 315,34 400,32" />
+        <circle cx="200" cy="32" r="4" />
+      </svg>
+      <div className="stream-stats">
+        {stats.map((item) => (
+          <div key={item.label}>
+            <strong>{item.value}</strong>
+            <span>{item.label}</span>
+          </div>
+        ))}
+      </div>
+      <div className="stream-footer">
+        <code>{address || "No wallet connected"}</code>
+        <div className="stream-actions">
+          {primaryAction}
+          {secondaryAction}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -525,9 +603,11 @@ function Intro({ method, setMethod, accessInput, setAccessInput, expectedAddress
     <div className="center-screen intro-screen">
       <div className="intro-decoration decoration-one" />
       <div className="intro-decoration decoration-two" />
+      <BrandPattern variant="wave" />
+      <BrandPattern variant="dots" />
       <div className="intro-card">
         <Brand />
-        <div className="intro-sun">*</div>
+        <BrandPattern variant="rings" />
         <p className="eyebrow">{isLocal ? "Import wallet" : "Connect XRPL wallet"}</p>
         <h1>{isLocal ? <>Your wallet,<br /><em>imported locally.</em></> : <>Your wallet,<br /><em>exactly as selected.</em></>}</h1>
         <p className="intro-copy">
@@ -594,7 +674,7 @@ function FundingModal({ onClose }) {
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="modal-card">
         <button className="modal-close" onClick={onClose} aria-label="Close">x</button>
-        <div className="modal-icon">o</div>
+        <CadenceMark className="modal-icon brand-mark" />
         <p className="eyebrow">Your wallet is ready</p>
         <h2>No RLUSD yet.</h2>
         <p className="section-copy">Fund the wallet first, then Cadence can read the balance and help you plan payments.</p>
@@ -912,6 +992,8 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
 
   return (
     <div className="app-shell employee-app">
+      <BrandPattern variant="wave" />
+      <BrandPattern variant="dots" />
       <header className="topbar">
         <Brand compact />
         <div className="topbar-right">
@@ -932,24 +1014,20 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
           <div className="live-pill"><span className="online-dot" />Employee dashboard</div>
         </div>
 
-        <section className="employee-balance-card">
-          <div className="employee-balance-top">
-            <div>
-              <p className="eyebrow">Available balance RLUSD</p>
-              <div className="employee-balance-number">${balanceWhole}<span>.{balanceCents}</span></div>
-              <p>{balanceLoading ? "Reading XRPL balance..." : `Read from ${shortAddress(connectedWallet)} on XRPL mainnet`}</p>
-            </div>
-            <div className="employee-live-tag"><span className="online-dot" />Live</div>
-          </div>
-          <div className="employee-balance-footer">
-            <code>{connectedWallet || "No wallet connected"}</code>
-            <div>
-              <Button kind="secondary" onClick={onRefreshBalance} disabled={balanceLoading}>{balanceLoading ? "Reading..." : "Refresh balance"}</Button>
-              <Button kind="soft" onClick={() => setWithdrawn(true)} disabled={withdrawn}>{withdrawn ? "Withdrawal queued" : "Withdraw"}</Button>
-              {withdrawn && <p>Funds settle in your linked account shortly.</p>}
-            </div>
-          </div>
-        </section>
+        <StreamWidget
+          label="Available balance RLUSD"
+          amount={rlusdBalance}
+          subcopy={balanceLoading ? "Reading XRPL balance..." : `Read from ${shortAddress(connectedWallet)} on XRPL mainnet`}
+          address={connectedWallet}
+          stats={[
+            { value: money(verifiedLastSevenDays, 2), label: "7 day income" },
+            { value: newestPayment ? money(newestPayment.amount, 4) : "$0.0000", label: "Latest payment" },
+            { value: `${incomeRows.length}`, label: "Verified txns" },
+          ]}
+          primaryAction={<Button kind="secondary" onClick={onRefreshBalance} disabled={balanceLoading}>{balanceLoading ? "Reading..." : "Refresh balance"}</Button>}
+          secondaryAction={<Button kind="soft" onClick={() => setWithdrawn(true)} disabled={withdrawn}>{withdrawn ? "Withdrawal queued" : "Withdraw"}</Button>}
+        />
+        {withdrawn && <p className="inline-note">Funds settle in your linked account shortly.</p>}
 
         <div className="employee-stat-grid">
           <section className="employee-card">
@@ -1011,10 +1089,24 @@ function Dashboard({ walletAddress, walletProvider, rlusdBalance, balanceLoading
     : "This wallet was imported from a mnemonic seed phrase or XRPL family seed for local signing.";
   return (
     <div className="app-shell">
+      <BrandPattern variant="wave" />
+      <BrandPattern variant="rings" />
       <header className="topbar"><Brand compact /><div className="topbar-right"><div className="wallet-chip"><span className="online-dot" />{shortAddress(walletAddress)}</div><Button kind="ghost" onClick={onOpenEmployee}>Employee dashboard</Button><Button kind="ghost" onClick={onExportLogs}>Support file</Button><Button kind="ghost" onClick={onReset}>Change wallet</Button></div></header>
       <main className="dashboard-content">
         <div className="welcome-row"><div><p className="eyebrow">Employer dashboard</p><h1>Send RLUSD with confidence</h1><p className="muted-line">{signingCopy}</p></div><div className="live-pill"><span className="online-dot" />{providerLabel} connected</div></div>
-        <section className="balance-card"><div><p className="eyebrow">Available balance RLUSD</p><div className="balance-number">{money(rlusdBalance, 2)}</div><p className="muted-line">{walletAddress ? shortAddress(walletAddress) : "No wallet connected"}</p></div><div className="balance-actions"><Button kind="secondary" onClick={onRefreshBalance} disabled={balanceLoading}>{balanceLoading ? "Reading..." : "Refresh balance"}</Button>{rlusdBalance <= 0 && <Button kind="soft" onClick={onOpenFunding}>Add RLUSD</Button>}</div></section>
+        <StreamWidget
+          label="Employer wallet balance"
+          amount={rlusdBalance}
+          subcopy={balanceLoading ? "Reading XRPL balance..." : signingCopy}
+          address={walletAddress ? shortAddress(walletAddress) : "No wallet connected"}
+          stats={[
+            { value: people.length.toLocaleString(), label: "Payment plans" },
+            { value: selectedPerson ? money(getSchedule(selectedPerson).perPayment, 4) : "$0.0000", label: "Next payout" },
+            { value: SOURCE_TAG, label: "Source tag" },
+          ]}
+          primaryAction={<Button kind="secondary" onClick={onRefreshBalance} disabled={balanceLoading}>{balanceLoading ? "Reading..." : "Refresh balance"}</Button>}
+          secondaryAction={rlusdBalance <= 0 ? <Button kind="soft" onClick={onOpenFunding}>Add RLUSD</Button> : null}
+        />
         <section className="payer-strip"><div><p className="eyebrow">Payment wallet</p><strong>{shortAddress(walletAddress)}</strong><span>{payerCopy}</span></div><Button kind="secondary" onClick={onReset}>Change wallet</Button></section>
         <div className="content-grid"><PeopleList people={people} selectedId={selectedId} onSelect={onSelect} onAdd={onAdd} />{selectedPerson ? <PersonDetails person={selectedPerson} onEdit={() => onEdit(selectedPerson)} onToggle={() => onToggle(selectedPerson.id)} onPay={() => onPay(selectedPerson)} walletReady={walletReady} paymentMessage={paymentMessage} /> : <div className="details-card details-empty"><div className="empty-sun">*</div><h2>Add a recipient to begin.</h2><p>Create a payment plan with a verified XRPL destination address before sending RLUSD.</p><Button onClick={onAdd}>Create payment plan</Button></div>}</div>
         <section className="history-panel"><div className="card-heading"><div><p className="eyebrow">Payment activity</p><h2>Recent actions</h2></div><Button kind="small" onClick={onExportLogs}>Download support file</Button></div>{history.length === 0 ? <p className="muted-line">No payment activity yet.</p> : <div className="history-list">{history.slice(0, 8).map((item) => <div className={`history-row ${item.status}`} key={item.id}><div><b>{item.title}</b><span>{item.detail}</span></div><time>{new Date(item.at).toLocaleString()}</time></div>)}</div>}</section>
@@ -1399,25 +1491,43 @@ export default function CadenceDashboard() {
   return (
     <>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=Playfair+Display:wght@600;700&display=swap');
         * { box-sizing: border-box; }
-        body { margin: 0; background: ${COLORS.paper}; color: ${COLORS.ink}; font-family: 'DM Sans', sans-serif; }
+        body {
+          margin: 0;
+          background:
+            linear-gradient(90deg, rgba(31,45,36,.04) 1px, transparent 1px),
+            linear-gradient(180deg, rgba(31,45,36,.04) 1px, transparent 1px),
+            ${COLORS.paper};
+          background-size: 72px 72px;
+          color: ${COLORS.ink};
+          font-family: 'Inter', sans-serif;
+        }
         button, input, select { font: inherit; }
         button { cursor: pointer; }
         button:disabled { cursor: not-allowed; opacity: .55; }
         .center-screen { min-height: 100vh; display: grid; place-items: center; padding: 28px; position: relative; overflow: hidden; }
-        .intro-screen { background: linear-gradient(135deg, #fbf8f1 0%, #f3eee2 100%); }
+        .intro-screen { background: ${COLORS.paper}; }
         .intro-card, .setup-card { width: min(100%, 540px); position: relative; z-index: 1; }
-        .intro-card { padding: 46px 48px; background: rgba(255,253,248,.88); border: 1px solid rgba(231,226,215,.9); border-radius: 28px; box-shadow: 0 24px 70px rgba(72,74,56,.12); text-align: center; }
+        .intro-card { padding: 46px 48px; background: rgba(255,249,236,.9); border: 1px solid rgba(228,216,193,.9); border-radius: 8px; box-shadow: 0 24px 70px rgba(31,45,36,.12); text-align: center; overflow: hidden; }
         .intro-card > div:first-child { justify-content: center; }
-        .brand-mark { width: 42px; height: 42px; display: grid; place-items: center; background: ${COLORS.ink}; color: #fffdf8; border-radius: 14px 14px 14px 4px; font: 600 25px Georgia, serif; transform: rotate(-5deg); }
-        .intro-card .brand-mark { width: 48px; height: 48px; font-size: 29px; }
-        .intro-sun { margin: 46px 0 14px; color: ${COLORS.coral}; font-size: 32px; }
-        .eyebrow { margin: 0 0 8px; text-transform: uppercase; letter-spacing: .14em; font-size: 10px; font-weight: 700; color: ${COLORS.muted}; }
+        .brand-lockup { display: flex; align-items: center; gap: 12px; position: relative; z-index: 1; }
+        .brand-mark { width: 42px; height: 42px; display: grid; place-items: center; flex: 0 0 auto; background: ${COLORS.ink}; border-radius: 12px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+        .brand-mark svg { width: 29px; height: 29px; }
+        .brand-mark path { stroke: ${COLORS.paper}; stroke-linecap: round; }
+        .brand-mark path:nth-child(1) { stroke-width: 6; }
+        .brand-mark path:nth-child(2) { stroke-width: 4; }
+        .brand-mark path:nth-child(3) { stroke-width: 5; }
+        .intro-card .brand-mark { width: 54px; height: 54px; }
+        .intro-card .brand-mark svg { width: 38px; height: 38px; }
+        .brand-word { font-family: 'Playfair Display', Georgia, serif; font-weight: 700; line-height: 1; letter-spacing: 0; }
+        .brand-xrp { margin-top: 3px; font-family: 'IBM Plex Mono', monospace; color: ${COLORS.coral}; font-size: 9px; letter-spacing: .35em; }
+        .brand-tagline { margin-top: 8px; color: ${COLORS.muted}; font-size: 12px; }
+        .eyebrow { margin: 0 0 8px; text-transform: uppercase; letter-spacing: .16em; font-size: 10px; font-weight: 700; color: ${COLORS.coral}; font-family: 'IBM Plex Mono', monospace; }
         h1, h2, h3, p { margin-top: 0; }
-        h1, h2, h3 { font-family: 'Fraunces', Georgia, serif; font-weight: 600; letter-spacing: -.045em; }
+        h1, h2, h3 { font-family: 'Playfair Display', Georgia, serif; font-weight: 700; letter-spacing: 0; }
         h1 { font-size: clamp(42px, 6vw, 65px); line-height: .98; margin-bottom: 20px; }
-        h1 em { color: ${COLORS.coralDark}; font-style: normal; }
+        h1 em { color: ${COLORS.coral}; font-style: italic; }
         h2 { font-size: 30px; line-height: 1.05; margin-bottom: 10px; }
         h3 { font-size: 24px; margin: 0; }
         .intro-copy, .section-copy { color: ${COLORS.muted}; line-height: 1.65; font-size: 14px; }
@@ -1427,17 +1537,17 @@ export default function CadenceDashboard() {
         .intro-connect-form { display: grid; gap: 14px; max-width: 390px; margin: 0 auto; text-align: left; }
         .intro-connect-form .button { width: 100%; }
         .xrpl-connector { display: none; }
-        .button { border: 0; border-radius: 12px; padding: 13px 18px; font-weight: 700; color: ${COLORS.ink}; transition: transform .15s ease, box-shadow .15s ease, background .15s ease; }
+        .button { border: 0; border-radius: 8px; padding: 13px 18px; font-weight: 700; color: ${COLORS.ink}; transition: transform .15s ease, box-shadow .15s ease, background .15s ease; }
         .button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 18px rgba(52,63,53,.12); }
-        .button-primary { background: ${COLORS.ink}; color: #fffdf8; }
+        .button-primary { background: ${COLORS.coral}; color: #fff8ec; }
         .button-secondary { background: ${COLORS.card}; border: 1px solid ${COLORS.line}; }
-        .button-soft { background: ${COLORS.mint}; color: ${COLORS.mintDark}; }
+        .button-soft { background: ${COLORS.mint}; color: ${COLORS.ink}; }
         .button-ghost { padding: 8px 10px; background: transparent; color: ${COLORS.muted}; font-size: 12px; }
         .button-small { padding: 9px 12px; font-size: 12px; background: ${COLORS.mint}; color: ${COLORS.mintDark}; }
         .button span { margin-left: 8px; font-size: 16px; }
         .intro-decoration { position: absolute; border-radius: 50%; filter: blur(1px); opacity: .65; }
         .decoration-one { width: 260px; height: 260px; top: -90px; right: 12%; background: ${COLORS.butter}; }
-        .decoration-two { width: 330px; height: 330px; bottom: -170px; left: 4%; background: ${COLORS.mint}; }
+        .decoration-two { width: 330px; height: 330px; bottom: -170px; left: 4%; background: ${COLORS.stone}; }
         .setup-screen { background: ${COLORS.paper}; }
         .setup-card { max-width: 480px; padding: 30px; background: ${COLORS.card}; border: 1px solid ${COLORS.line}; border-radius: 24px; box-shadow: 0 18px 50px rgba(72,74,56,.08); }
         .progress-dots { display: flex; gap: 6px; margin: 38px 0 32px; }
@@ -1459,24 +1569,74 @@ export default function CadenceDashboard() {
         .error-message, .success-message { padding: 11px 13px; border-radius: 10px; font-size: 12px; line-height: 1.4; margin-bottom: 14px; }
         .error-message { color: ${COLORS.coralDark}; background: #fae9e2; }
         .success-message { color: ${COLORS.mintDark}; background: #e3f2e9; margin-top: 16px; }
-        .app-shell { min-height: 100vh; background: ${COLORS.paper}; }
-        .topbar { height: 74px; padding: 0 clamp(20px, 5vw, 76px); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid ${COLORS.line}; background: rgba(255,253,248,.75); }
+        .app-shell { min-height: 100vh; background: transparent; position: relative; overflow: hidden; }
+        .topbar { position: relative; z-index: 2; height: 74px; padding: 0 clamp(20px, 5vw, 76px); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid ${COLORS.line}; background: rgba(246,241,230,.82); backdrop-filter: blur(12px); }
         .topbar-right, .wallet-chip, .welcome-row, .balance-actions, .card-heading, .details-top, .details-actions, .payer-strip { display: flex; align-items: center; }
         .topbar-right { gap: 12px; }
         .wallet-chip, .live-pill { gap: 8px; color: ${COLORS.muted}; font-size: 12px; }
         .wallet-chip { padding: 8px 10px; background: ${COLORS.card}; border: 1px solid ${COLORS.line}; border-radius: 10px; font-family: monospace; }
         .online-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; background: #65aa7c; box-shadow: 0 0 0 3px rgba(101,170,124,.15); }
-        .dashboard-content { max-width: 1200px; margin: 0 auto; padding: 54px clamp(20px, 5vw, 76px) 40px; }
+        .brand-pattern { position: absolute; pointer-events: none; z-index: 0; }
+        .pattern-wave { left: -24vw; top: 96px; width: 150vw; height: 120px; opacity: .24; overflow: visible; }
+        .pattern-wave svg { width: 116%; height: 100%; margin-left: -8%; animation: brandWaveDrift 18s ease-in-out infinite alternate; }
+        .pattern-wave path { fill: none; stroke: ${COLORS.ink}; stroke-width: 1.2; stroke-linecap: round; stroke-dasharray: 28 18 84 22; animation: brandWaveFlow var(--wave-speed, 11s) linear infinite; }
+        .pattern-wave path:nth-child(1), .pattern-wave path:nth-child(2) { stroke: ${COLORS.coral}; }
+        .pattern-wave path:nth-child(1) { --wave-speed: 9s; }
+        .pattern-wave path:nth-child(2) { --wave-speed: 10.5s; animation-direction: reverse; }
+        .pattern-wave path:nth-child(3) { --wave-speed: 12s; }
+        .pattern-wave path:nth-child(4) { --wave-speed: 13.5s; animation-direction: reverse; }
+        .pattern-wave path:nth-child(5) { --wave-speed: 15s; }
+        .pattern-wave path:nth-child(6) { --wave-speed: 16.5s; animation-direction: reverse; }
+        .pattern-dots { right: 7%; top: 132px; width: 134px; height: 96px; opacity: .34; background-image: radial-gradient(circle, ${COLORS.coral} 1.8px, transparent 2px); background-size: 18px 18px; animation: dotPulse 4.6s ease-in-out infinite alternate; }
+        .pattern-rings { right: 6%; top: 190px; width: 170px; height: 170px; border-radius: 50%; border: 1px solid rgba(234,215,154,.62); box-shadow: 0 0 0 18px rgba(234,215,154,.08), 0 0 0 37px rgba(234,215,154,.38), 0 0 0 57px rgba(234,215,154,.24); opacity: .75; }
+        .pattern-lines { right: 8%; bottom: 40px; width: 190px; height: 130px; opacity: .26; background: repeating-linear-gradient(135deg, transparent 0 13px, rgba(31,45,36,.72) 13px 14px, transparent 14px 27px); }
+        .pattern-lines:before, .pattern-lines:after { content: ""; position: absolute; width: 2px; height: 76px; background: ${COLORS.coral}; transform: rotate(45deg); }
+        .pattern-lines:before { right: 44px; top: 14px; }
+        .pattern-lines:after { right: 88px; bottom: 8px; opacity: .55; }
+        .intro-card .pattern-rings { top: 24px; right: -62px; width: 130px; height: 130px; opacity: .52; }
+        .intro-screen > .pattern-wave { top: 18%; opacity: .2; }
+        .intro-screen > .pattern-dots { left: 8%; right: auto; top: auto; bottom: 12%; }
+        .employee-app > .pattern-dots { top: 260px; }
+        .proof-app > .pattern-wave { opacity: .16; }
+        @keyframes brandWaveDrift { 0% { transform: translateX(-4%); } 100% { transform: translateX(4%); } }
+        @keyframes brandWaveFlow { to { stroke-dashoffset: -260; } }
+        @keyframes dotPulse { 0% { opacity: .18; transform: translateY(0); } 100% { opacity: .42; transform: translateY(-8px); } }
+        .dashboard-content { position: relative; z-index: 1; max-width: 1200px; margin: 0 auto; padding: 54px clamp(20px, 5vw, 76px) 40px; }
         .welcome-row { justify-content: space-between; gap: 20px; margin-bottom: 30px; }
         .welcome-row h1 { font-size: clamp(38px, 5vw, 58px); margin-bottom: 10px; }
         .muted-line { margin: 0; color: ${COLORS.muted}; font-size: 13px; }
-        .live-pill { padding: 8px 12px; border-radius: 99px; background: #e7f2e9; color: ${COLORS.mintDark}; font-weight: 700; }
-        .balance-card { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 30px 34px; min-height: 190px; border-radius: 24px; background: ${COLORS.ink}; color: #fffdf8; box-shadow: 0 18px 40px rgba(36,51,45,.16); }
+        .live-pill { padding: 8px 12px; border-radius: 99px; background: rgba(234,215,154,.35); color: ${COLORS.ink}; font-weight: 700; }
+        .balance-card { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 30px 34px; min-height: 190px; border-radius: 8px; background: ${COLORS.ink}; color: #fffdf8; box-shadow: 0 18px 40px rgba(36,51,45,.16); }
         .balance-card .eyebrow, .balance-card .muted-line { color: #c1d0c7; }
-        .balance-number { font: 600 clamp(48px, 7vw, 82px)/1 'Fraunces', Georgia, serif; letter-spacing: -.06em; margin: 12px 0 10px; }
+        .balance-number { font: 600 clamp(48px, 7vw, 82px)/1 'Playfair Display', Georgia, serif; margin: 12px 0 10px; }
         .balance-actions { gap: 10px; flex-wrap: wrap; }
         .balance-card .button-secondary { background: #fffdf8; border-color: #fffdf8; }
         .balance-card .button-soft { background: ${COLORS.mint}; }
+        .stream-widget { position: relative; display: grid; gap: 22px; margin-bottom: 14px; padding: 28px 30px 24px; border: 1px solid rgba(53,70,58,.9); border-radius: 12px; background: radial-gradient(circle at 82% 20%, rgba(234,215,154,.14), transparent 32%), ${COLORS.ink2}; color: #fff8ec; box-shadow: 0 24px 54px rgba(31,45,36,.24); overflow: hidden; }
+        .stream-widget-rings { position: absolute; right: -82px; top: 28px; width: 170px; height: 170px; border-radius: 50%; border: 1px solid rgba(234,215,154,.44); box-shadow: 0 0 0 18px rgba(234,215,154,.08), 0 0 0 36px rgba(234,215,154,.04); }
+        .stream-top, .stream-stats, .stream-footer { position: relative; z-index: 1; }
+        .stream-top { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; }
+        .stream-label, .stream-live { font-family: 'IBM Plex Mono', monospace; font-size: 10px; letter-spacing: .14em; text-transform: uppercase; }
+        .stream-label { margin: 0 0 14px; color: #aeb7ad; }
+        .stream-live { display: inline-flex; align-items: center; gap: 7px; color: ${COLORS.mint}; }
+        .stream-amount { font-family: 'IBM Plex Mono', monospace; font-size: clamp(42px, 7vw, 72px); line-height: 1; letter-spacing: -.03em; }
+        .stream-amount span { color: ${COLORS.coral}; }
+        .stream-subcopy { margin: 8px 0 0; color: #aeb7ad; font-size: 12px; line-height: 1.5; max-width: 560px; }
+        .stream-wave { position: relative; z-index: 1; width: 100%; height: 72px; overflow: visible; }
+        .stream-wave path { fill: none; }
+        .stream-wave-base { stroke: rgba(246,241,230,.2); stroke-width: 1; }
+        .stream-wave-line { stroke: ${COLORS.coral}; stroke-width: 2; stroke-linecap: round; stroke-dasharray: 130 28 18 28; animation: streamLineFlow 3.2s linear infinite; }
+        .stream-wave circle { fill: ${COLORS.coral}; animation: streamDot 2.4s ease-in-out infinite alternate; }
+        .stream-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; padding-top: 18px; border-top: 1px solid rgba(228,216,193,.18); }
+        .stream-stats strong { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 16px; color: #fff8ec; word-break: break-word; }
+        .stream-stats span { display: block; margin-top: 5px; color: #aeb7ad; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+        .stream-footer { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+        .stream-footer code { color: #aeb7ad; word-break: break-all; }
+        .stream-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .stream-widget .button-secondary { background: #fff8ec; border-color: #fff8ec; }
+        .stream-widget .button-soft { background: ${COLORS.mint}; }
+        @keyframes streamLineFlow { to { stroke-dashoffset: -204; } }
+        @keyframes streamDot { 0% { transform: translateY(0); } 100% { transform: translateY(-16px); } }
         .payer-strip { justify-content: space-between; gap: 18px; padding: 17px 20px; margin: 14px 0 34px; border: 1px solid ${COLORS.line}; border-radius: 16px; background: ${COLORS.card}; }
         .payer-strip strong { display: block; font: 600 17px Georgia, serif; }
         .payer-strip span { display: block; margin-top: 4px; color: ${COLORS.muted}; font-size: 11px; }

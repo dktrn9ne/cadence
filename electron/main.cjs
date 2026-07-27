@@ -18,7 +18,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 640,
     title: "Cadence",
-    backgroundColor: "#f7f4ee",
+    backgroundColor: "#F6F1E6",
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
