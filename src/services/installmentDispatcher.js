@@ -58,6 +58,11 @@ export function createInstallmentDispatcher({
   // Claim set lives in a ref owned by the caller so it survives re-renders
   // (including wallet-state changes) for the lifetime of the mount.
   claims = new Set(),
+  // Durable record hook (PR 02): called synchronously at each truth point —
+  // attempt accepted (before submit), and each terminal outcome — so the
+  // append-only payment journal can record what happened. The door does not
+  // know journal internals; it reports, the record layer decides.
+  onJournalEvent = null,
 }) {
   // Persist one attempt transition durably (planState writes immediately, so
   // the hash survives the reload it exists to be reconciled after) and commit
@@ -107,6 +112,18 @@ export function createInstallmentDispatcher({
     try {
       let attempt = { ...beginInstallment(current, sequence, now()), amount };
       persistAttempt(person.id, attempt);
+      // Truth point: the attempt is accepted and durably recorded BEFORE any
+      // submit call — the pre-dispatch journal write that closes the crash
+      // window.
+      onJournalEvent?.({
+        type: "attempt_started",
+        plan: current,
+        sequence,
+        amount,
+        destination: current.destination ?? current.address,
+        payerAddress: current.payer ?? current.payerAddress,
+        source,
+      });
 
       // --- build + submit (wallet prompt, or local sign + submitAndWait) ----
       let response;
@@ -119,6 +136,13 @@ export function createInstallmentDispatcher({
         attempt = settleRejected(attempt);
         persistAttempt(person.id, attempt);
         if (source === "scheduled") unschedule(person.id);
+        onJournalEvent?.({
+          type: "attempt_outcome",
+          status: "failed_no_hash",
+          installmentId: key,
+          error: error?.message || "The payment could not be built or submitted.",
+          reason: "construction_or_network",
+        });
         return { dispatched: true, outcome: "validated_failure", error, hash: null, failureReason: error?.message || "The payment could not be built or submitted." };
       }
 
@@ -132,6 +156,13 @@ export function createInstallmentDispatcher({
         attempt = settleRejected(attempt);
         persistAttempt(person.id, attempt);
         if (source === "scheduled") unschedule(person.id);
+        onJournalEvent?.({
+          type: "attempt_outcome",
+          status: "failed_no_hash",
+          installmentId: key,
+          error: "Wallet confirmation was cancelled.",
+          reason: "sign_rejected",
+        });
         return { dispatched: true, outcome: "validated_failure", error: null, hash: null, failureReason: "Wallet confirmation was cancelled." };
       }
 
@@ -146,6 +177,7 @@ export function createInstallmentDispatcher({
       const meta = result?.result?.meta ?? result?.meta ?? null;
       const verdict = classifyTransactionResult({ meta });
       let settled;
+      let settledLedgerResult = meta?.TransactionResult || null;
       if (verdict === OUTCOMES.SUCCESS) {
         settled = settleValidated(attempt, meta);
       } else if (verdict === OUTCOMES.FAILURE) {
@@ -154,13 +186,24 @@ export function createInstallmentDispatcher({
         const lookup = await reconcile(txHash);
         if (lookup?.outcome === OUTCOMES.SUCCESS) {
           settled = settleValidated(attempt, { TransactionResult: "tesSUCCESS" });
+          settledLedgerResult = "tesSUCCESS";
         } else if (lookup?.outcome === OUTCOMES.FAILURE) {
           settled = settleRejected(attempt);
         } else {
           settled = markUnresolved(attempt, txHash, now());
+          settledLedgerResult = null;
         }
       }
       persistAttempt(person.id, settled);
+      // Truth point: the terminal outcome, labeled with what the ledger
+      // actually said (or that it said nothing readable).
+      onJournalEvent?.({
+        type: "attempt_outcome",
+        status: settled.status,
+        installmentId: key,
+        txHash: txHash || undefined,
+        ledgerResult: settledLedgerResult || undefined,
+      });
 
       if (settled.status !== "validated_success") {
         if (settled.status === "validated_failure" && source === "scheduled") {
