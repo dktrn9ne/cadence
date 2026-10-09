@@ -1,6 +1,7 @@
-// Unit tests for the pure mount-recovery rules (PR 04 wave 4).
+// Unit tests for the pure mount-recovery rules (PR 04 wave 4, audit-fix
+// revision per art_FIvT05e6).
 import { describe, expect, it } from "vitest";
-import { countMissedWindows, hydrateRestoredPlans, mountAttemptAction } from "./recovery.js";
+import { ATTEMPT_STALE_MS, countMissedWindows, hydrateRestoredPlans, mountAttemptAction } from "./recovery.js";
 
 describe("mountAttemptAction", () => {
   it("reconciles submitted and unresolved attempts by hash — the only exit from an unknown outcome", () => {
@@ -9,9 +10,51 @@ describe("mountAttemptAction", () => {
     }
   });
 
-  it("records a failed attempt for a wallet prompt that died with the previous session", () => {
-    // Nothing was submitted, so there is no hash to reconcile.
-    expect(mountAttemptAction({ sequence: 2, status: "awaiting_signature", hash: null, submittedAt: 1 })).toBe("record-failed");
+  it("on a mount, a wallet prompt that died with the previous session always parks unresolved", () => {
+    // Nothing proves the submission did not happen, so there is no retryable
+    // state — no hash to reconcile either. Freshness is irrelevant: every
+    // record a mount sees belongs to a dead session (audit violation 2).
+    const now = 1_000_000;
+    expect(
+      mountAttemptAction({ sequence: 2, status: "awaiting_signature", hash: null, submittedAt: now }, { now })
+    ).toBe("record-unresolved");
+    expect(
+      mountAttemptAction(
+        { sequence: 2, status: "awaiting_signature", hash: null, submittedAt: now - ATTEMPT_STALE_MS - 1 },
+        { now }
+      )
+    ).toBe("record-unresolved");
+  });
+
+  it("on a live tick, a fresh awaiting_signature stays owned by its dispatcher — never expired mid-prompt", () => {
+    const now = 1_000_000;
+    expect(
+      mountAttemptAction(
+        { sequence: 2, status: "awaiting_signature", hash: null, submittedAt: now - 1000 },
+        { now, live: true }
+      )
+    ).toBe("none");
+    // Exactly at the staleness boundary it is still live — only strictly
+    // older records expire.
+    expect(
+      mountAttemptAction(
+        { sequence: 2, status: "awaiting_signature", hash: null, submittedAt: now - ATTEMPT_STALE_MS },
+        { now, live: true }
+      )
+    ).toBe("none");
+  });
+
+  it("on a live tick, an awaiting_signature that outlived its staleness window parks unresolved", () => {
+    const now = 1_000_000;
+    // A crashed or hung prompt: the dispatcher is gone, submission state is
+    // unknowable — expired to unresolved (blocked, surfaced), never to the
+    // retryable validated_failure state.
+    expect(
+      mountAttemptAction(
+        { sequence: 2, status: "awaiting_signature", hash: null, submittedAt: now - ATTEMPT_STALE_MS - 1 },
+        { now, live: true }
+      )
+    ).toBe("record-unresolved");
   });
 
   it("leaves terminal statuses alone", () => {
