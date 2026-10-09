@@ -19,7 +19,7 @@ import {
   selectIncomeRows,
   stampPlanPayer,
 } from "./domain/incomeProof";
-import { getXrplConnect } from "./services/wallet-connection.js";
+import { getXrplConnect, readXamanApiKey } from "./services/wallet-connection.js";
 import { submitRlusdPayment, submitXrplConnectRlusdPayment } from "./services/payments.js";
 
 const LOG_STORAGE_KEY = "cadence-debug-logs-v1";
@@ -382,14 +382,21 @@ function Field({ label, children, help }) {
   );
 }
 
-function Intro({ method, setMethod, accessInput, setAccessInput, expectedAddress, setExpectedAddress, onSubmit, error, isLocal, connectorRef, xrplManager }) {
+function Intro({ method, setMethod, accessInput, setAccessInput, expectedAddress, setExpectedAddress, onSubmit, error, onConnectorError, isLocal, connectorRef, xrplManager }) {
   const [showWalletSecret, setShowWalletSecret] = useState(false);
+  const xamanConfigured = Boolean(readXamanApiKey());
 
   useEffect(() => {
     if (!isLocal && connectorRef?.current && xrplManager) {
-      connectorRef.current.setWalletManager(xrplManager);
+      try {
+        connectorRef.current.setWalletManager(xrplManager);
+      } catch {
+        // A throwing connector must degrade to UI state — an uncaught error
+        // here runs inside React's commit phase and can wedge the whole tree.
+        onConnectorError?.("The wallet picker could not start. Please refresh the page and try again.");
+      }
     }
-  }, [connectorRef, isLocal, xrplManager]);
+  }, [connectorRef, isLocal, xrplManager, onConnectorError]);
 
   return (
     <div className="center-screen intro-screen">
@@ -441,13 +448,23 @@ function Intro({ method, setMethod, accessInput, setAccessInput, expectedAddress
             </>
           )}
           {!isLocal && (
-            <xrpl-wallet-connector
-              ref={connectorRef}
-              class="xrpl-connector"
-              wallets="xaman,crossmark,gemwallet,xyra"
-              primary-wallet="xaman"
-              background-color={theme.surfaceEmbed}
-            />
+            <>
+              <xrpl-wallet-connector
+                ref={connectorRef}
+                class="xrpl-connector"
+                wallets={xamanConfigured ? "xaman,crossmark,gemwallet,xyra" : "crossmark,gemwallet,xyra"}
+                primary-wallet={xamanConfigured ? "xaman" : undefined}
+                background-color={theme.surfaceEmbed}
+              />
+              {!xamanConfigured && (
+                <div className="wallet-option-disabled" role="note" aria-label="Xaman unavailable">
+                  <span className="wallet-option-name">Xaman</span>
+                  <span className="wallet-option-hint">
+                    Unavailable — this Cadence build has no Xaman API key configured. Crossmark, GemWallet, and Xyra still connect.
+                  </span>
+                </div>
+              )}
+            </>
           )}
           <Button type="submit">{isLocal ? "Import wallet" : "Connect XRPL wallet"} <span>{">"}</span></Button>
         </form>
@@ -1103,24 +1120,46 @@ export default function CadenceDashboard() {
       return xrplConnectManagerRef.current;
     }
 
+    let xrplConnectModule;
+    try {
+      xrplConnectModule = await getXrplConnect();
+    } catch (error) {
+      // Module-load failure must surface as a caught setup error, never an
+      // unhandled rejection that leaves the picker dead.
+      throw new Error("Wallet connection failed to load. Check your connection and try again.", { cause: error });
+    }
     const {
       WalletManager,
       XamanAdapter,
       CrossmarkAdapter,
       GemWalletAdapter,
       XyraAdapter,
-    } = await getXrplConnect();
+    } = xrplConnectModule;
 
-    const manager = new WalletManager({
-      adapters: [
-        new XamanAdapter(),
-        new CrossmarkAdapter(),
-        new GemWalletAdapter(),
-        new XyraAdapter(),
-      ],
-      network: "mainnet",
-      autoConnect: false,
-    });
+    // Xaman is registered only when an API key is configured: the adapter
+    // throws "API key is required for Xaman" on init/connect without one,
+    // which logged console errors and dead-ended the picker on a Connection
+    // Failed screen. A missing key degrades to a disabled UI option instead
+    // (Intro renders the inline hint); non-Xaman wallets stay selectable.
+    const xamanApiKey = readXamanApiKey();
+    let manager;
+    try {
+      manager = new WalletManager({
+        adapters: [
+          ...(xamanApiKey ? [new XamanAdapter({ apiKey: xamanApiKey })] : []),
+          new CrossmarkAdapter(),
+          new GemWalletAdapter(),
+          new XyraAdapter(),
+        ],
+        network: "mainnet",
+        autoConnect: false,
+      });
+    } catch (error) {
+      xrplConnectManagerRef.current = null;
+      // Any adapter/manager construction error degrades to UI state — it must
+      // never escape and wedge the renderer's main thread.
+      throw new Error("Wallet connection could not start. Please refresh and try again.", { cause: error });
+    }
 
     manager.on("connect", (account) => {
       handleConnectedXrplAccount(account, manager.wallet?.id || "xrplconnect").catch((error) => {
@@ -1705,6 +1744,9 @@ export default function CadenceDashboard() {
         .intro-connect-form { display: grid; gap: 14px; max-width: 390px; margin: 0 auto; text-align: left; }
         .intro-connect-form .button { width: 100%; }
         .xrpl-connector { display: none; }
+        .wallet-option-disabled { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: 10px; border: 1px dashed ${theme.hairline}; background: ${theme.fillSoft}; }
+        .wallet-option-name { font-size: 12px; font-weight: 600; color: ${theme.textPrimary}; }
+        .wallet-option-hint { font-size: 11px; line-height: 1.45; color: ${theme.textMuted}; }
         .button { border: 0; border-radius: 10px; padding: 13px 18px; font-weight: 700; color: ${theme.textPrimary}; transition: transform .15s ease, box-shadow .15s ease, background .15s ease; }
         .button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 18px rgba(0,0,0,.4); }
         .button-primary { background: ${theme.gradient}; color: ${theme.textPrimary}; }
@@ -1974,7 +2016,7 @@ export default function CadenceDashboard() {
           .pattern-wave svg, .pattern-wave path, .pattern-dots, .stream-live, .stream-wave-line, .stream-wave circle { animation: none; }
         }
       `}</style>
-      {screen === "intro" && <Intro method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} expectedAddress={expectedAddress} setExpectedAddress={setExpectedAddress} onSubmit={finishSetup} error={setupError} isLocal={localDesktop} connectorRef={xrplConnectorRef} xrplManager={xrplConnectManager} />}
+      {screen === "intro" && <Intro method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} expectedAddress={expectedAddress} setExpectedAddress={setExpectedAddress} onSubmit={finishSetup} error={setupError} onConnectorError={setSetupError} isLocal={localDesktop} connectorRef={xrplConnectorRef} xrplManager={xrplConnectManager} />}
       {screen === "dashboard" && (
         <>
           {editorOpen ? (
