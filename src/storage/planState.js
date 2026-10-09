@@ -70,7 +70,11 @@ function sanitizePlan(plan) {
   return {
     id,
     payer: asString(plan.payer),
-    destination: asString(plan.destination),
+    // The dashboard's plan objects carry the destination address as `address`
+    // (the editor form field); it persists under the spec envelope's
+    // `destination` key. Accept both on input so the storage layer stays
+    // decoupled from the dashboard's field name.
+    destination: asString(plan.destination ?? plan.address),
     paidCount: asCount(plan.paidCount),
     nextRunAt: asStamp(plan.nextRunAt),
     active: plan.active === true,
