@@ -119,7 +119,7 @@ export function createInstallmentDispatcher({
         attempt = settleRejected(attempt);
         persistAttempt(person.id, attempt);
         if (source === "scheduled") unschedule(person.id);
-        return { dispatched: true, outcome: "validated_failure", error, hash: null };
+        return { dispatched: true, outcome: "validated_failure", error, hash: null, failureReason: error?.message || "The payment could not be built or submitted." };
       }
 
       const result = response?.result ?? {};
@@ -132,7 +132,7 @@ export function createInstallmentDispatcher({
         attempt = settleRejected(attempt);
         persistAttempt(person.id, attempt);
         if (source === "scheduled") unschedule(person.id);
-        return { dispatched: true, outcome: "validated_failure", error: null, hash: null };
+        return { dispatched: true, outcome: "validated_failure", error: null, hash: null, failureReason: "Wallet confirmation was cancelled." };
       }
 
       // Hash captured — persist it before classifying so the reload-mid-flight
@@ -166,7 +166,17 @@ export function createInstallmentDispatcher({
         if (settled.status === "validated_failure" && source === "scheduled") {
           unschedule(person.id);
         }
-        return { dispatched: true, outcome: settled.status, hash: txHash };
+        return {
+          dispatched: true,
+          outcome: settled.status,
+          hash: txHash,
+          // The ledger's own verdict (tec*/tef*/tem*), for an honest
+          // failed-attempt row — a reconciled failure without a readable code
+          // falls back to the generic ledger message in the UI.
+          failureReason: meta?.TransactionResult
+            ? `The ledger rejected the payment (${meta.TransactionResult}).`
+            : "The payment did not succeed on the ledger.",
+        };
       }
 
       // THE ONLY ADVANCE — validated_success, exactly once per attempt.
