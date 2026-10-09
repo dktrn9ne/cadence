@@ -5,8 +5,8 @@ import { CadenceLockup, CadenceMark } from "./brand/CadenceMark.jsx";
 import { RLUSD_CURRENCY, RLUSD_ISSUER, SOURCE_TAG } from "./domain/xrpl-constants.js";
 import { TIME_UNITS, FREQUENCIES, getSchedule, getFrequencyMs } from "./domain/schedule.js";
 import { createInstallmentDispatcher } from "./services/installmentDispatcher.js";
-import { flushPlans, loadPlans, savePlans } from "./storage/planState.js";
-import { dispatchBlockReason, installmentId } from "./domain/installment.js";
+import { flushPlans, latestAttemptFor, loadPlans, savePlans } from "./storage/planState.js";
+import { dispatchBlockReason } from "./domain/installment.js";
 import { countMissedWindows, hydrateRestoredPlans, mountAttemptAction } from "./domain/recovery.js";
 import { OUTCOMES, lookupTransaction } from "./services/xrplLedger.js";
 import {
@@ -564,7 +564,7 @@ function PersonDetails({ person, onEdit, onToggle, onPay, onApproveMissed, onSki
   // what the card surfaces. A verifying (unresolved) submission takes
   // precedence over the missed-window prompt — both block dispatch; the
   // recovered banner only shows when neither is pending.
-  const nextAttempt = person.attempts?.[installmentId(person.id, paidCount)];
+  const nextAttempt = latestAttemptFor(person, paidCount);
   const verifying = nextAttempt?.status === "unresolved";
   const verifyingHash = verifying && nextAttempt.hash ? `${String(nextAttempt.hash).slice(0, 10)}...` : null;
   const missedCount = Number(person.missedCount || 0);
@@ -1335,7 +1335,7 @@ export default function CadenceDashboard() {
         issuer: RLUSD_ISSUER,
       });
 
-      const result = await dispatchInstallment(person, paidCount, source, { amount: tokenAmount(schedule.perPayment) });
+      const result = await dispatchInstallment(person, paidCount, source, { amount: tokenAmount(schedule.perPayment), payer: walletAddress });
       return reportDispatchResult(person, source, result, schedule);
     } catch (error) {
       // The door classifies its own failures; reaching here is a defect in the
@@ -1390,6 +1390,16 @@ export default function CadenceDashboard() {
           addHistoryItem(setHistory, { status: "success", title: "Plan complete", detail: `${person.name} has received all planned installments.` });
           logEvent("payment.installment.skipped", { reason: "plan_complete", personId: person.id, name: person.name });
           break;
+        case "store-failed":
+          // Fail-closed store (audit violation 3): the attempt record could
+          // not land durably, so the payment was blocked BEFORE submission —
+          // never an untracked submission.
+          logEvent("payment.attempt.store_failed", { personId: person.id, name: person.name, source, error: safeLogPayload(result.error) });
+          if (source === "manual") {
+            setPaymentMessage("Cadence could not durably record this attempt (storage unavailable), so the payment was NOT submitted. Free up storage or leave private mode, then retry.");
+            addHistoryItem(setHistory, { status: "failed", title: "Attempt not recorded", detail: `${person.name} - storage refused the attempt record; the payment was blocked before submission.` });
+          }
+          break;
         default:
           logEvent("payment.blocked.unknown", { personId: person.id, name: person.name, source, reason: result.reason });
       }
@@ -1412,9 +1422,27 @@ export default function CadenceDashboard() {
       return result;
     }
     if (result.outcome === "unresolved") {
-      setPaymentMessage(`Submitted as ${txHash.slice(0, 10)}... before the outcome was known — Cadence is verifying it with the ledger.`);
-      addHistoryItem(setHistory, { status: "waiting", title: "Verifying with ledger", detail: `${person.name} - ${money(schedule.perPayment, 4)} - ${txHash} - outcome not yet known` });
-      logEvent("payment.unresolved", { personId: person.id, name: person.name, hash: txHash, source });
+      // The outcome is genuinely unknown — possibly on-ledger, never counted,
+      // never retried. A null hash means the wallet resolved without a usable
+      // confirmation: there is nothing to look up, so the attempt stays
+      // blocked until the operator resolves it (audit violation 2).
+      const heldDetail = txHash
+        ? `${person.name} - ${money(schedule.perPayment, 4)} - ${txHash} - outcome not yet known`
+        : `${person.name} - ${money(schedule.perPayment, 4)} - no usable hash - held unresolved, no automatic retry`;
+      setPaymentMessage(
+        txHash
+          ? `Submitted as ${txHash.slice(0, 10)}... before the outcome was known — Cadence is verifying it with the ledger.`
+          : `${result.failureReason || "The submission outcome is unknown."} Cadence is holding this installment unresolved — it must be reconciled before any retry.`,
+      );
+      addHistoryItem(setHistory, { status: "waiting", title: "Verifying with ledger", detail: heldDetail });
+      if (result.anomaly) {
+        addHistoryItem(setHistory, { status: "waiting", title: "Ledger identity mismatch", detail: `${person.name} - the ledger transaction for ${txHash} does not match this attempt's payer, destination, or amount; it stays unresolved and nothing was counted.` });
+        logEvent("payment.anomaly.identity_mismatch", { personId: person.id, name: person.name, hash: txHash, source });
+      }
+      if (result.storeDegraded) {
+        setPaymentMessage((current) => `${current} Warning: the attempt record could not be persisted durably — do not close the app before this attempt is reconciled.`);
+      }
+      logEvent("payment.unresolved", { personId: person.id, name: person.name, hash: txHash, source, anomaly: result.anomaly || null, storeDegraded: Boolean(result.storeDegraded) });
       return result;
     }
     // validated_failure — a failed attempt: surfaced, never advanced, never
@@ -1464,10 +1492,96 @@ export default function CadenceDashboard() {
     }));
   };
 
-  // Reconciliation runs at mount and on an explicit "Reconcile now" — never
-  // on a timer. StrictMode's double-invoked mount effect is absorbed here:
-  // the second invocation meets the in-flight flag and the per-key guard, so
-  // a lookup (and its exactly-once advance) can never run twice.
+  // Reconciliation pass — classify every persisted attempt by its durable
+  // state (audit art_FIvT05e6): unresolved/submitted attempts with a hash go
+  // through the ledger lookup; hashless unknowns and expired wallet prompts
+  // stay blocked; terminal records are left alone. Guard-free on purpose: the
+  // callers own the in-flight flag (StrictMode's double-invoked mount effect
+  // is absorbed there), so a lookup — and its exactly-once advance — can
+  // never run concurrently with itself. Returns the per-plan count of
+  // reconciled advances for the mount-only missed-window assessment.
+  const runReconcilePass = async (plans, { live = false } = {}) => {
+    const recoveredAdvances = new Map(plans.map((plan) => [plan.id, 0]));
+    for (const plan of plans) {
+      // Attempt keys are per-attempt (`${planId}:${sequence}#${n}`); iterate
+      // entries so numbered retries reconcile independently.
+      for (const [attemptKey, attempt] of Object.entries(plan.attempts || {})) {
+        // `live` marks a pass from the running session (tick or manual): it
+        // must never expire an attempt whose wallet prompt is open right now.
+        // Mount passes see only dead-session records and expire all of them.
+        const action = mountAttemptAction(attempt, { live });
+        if (action === "none") continue;
+        if (reconcilingKeysRef.current.has(attemptKey)) continue;
+        reconcilingKeysRef.current.add(attemptKey);
+        try {
+          if (action === "record-unresolved") {
+            // The wallet prompt died with the previous session: whether the
+            // submission happened is unknowable by construction, so the
+            // attempt parks in `unresolved` — blocked and surfaced, NEVER in
+            // the retryable `validated_failure` state (audit violation 2).
+            settleRecoveredAttempt(plan.id, attemptKey, { ...attempt, status: "unresolved" });
+            addHistoryItem(setHistory, { status: "waiting", title: "Recovered attempt held", detail: `${plan.name || "Plan"} - installment #${attempt.sequence + 1} was awaiting wallet confirmation when the app closed; it stays unresolved until the ledger can classify it — no retry may fire.` });
+            logEvent("recovery.attempt_held_unresolved", { personId: plan.id, key: attemptKey });
+          } else if (!attempt.hash) {
+            // A hashless unresolved attempt has nothing to look up: it stays
+            // blocked exactly as stored — surfaced, never retried.
+            settleRecoveredAttempt(plan.id, attemptKey, { ...attempt, status: "unresolved" });
+            logEvent("recovery.hashless_unresolved_held", { personId: plan.id, key: attemptKey });
+          } else {
+            logEvent("recovery.reconcile_started", { personId: plan.id, key: attemptKey, hash: `${String(attempt.hash).slice(0, 10)}...` });
+            // Identity-verified reconciliation (spec art_XPj3pWA4 locked
+            // decision 3): the looked-up transaction must BE this attempt's
+            // payment — payer, destination, exact amount — before its verdict
+            // may classify. A mismatch resolves still_unknown and the attempt
+            // stays blocked.
+            const { outcome } = await lookupTransaction(attempt.hash, {
+              payer: attempt.payer,
+              destination: attempt.destination,
+              amount: attempt.amount,
+            });
+            if (outcome === OUTCOMES.SUCCESS) {
+              settleRecoveredAttempt(plan.id, attemptKey, { ...attempt, status: "validated_success" }, { advance: true });
+              recoveredAdvances.set(plan.id, (recoveredAdvances.get(plan.id) || 0) + 1);
+              addHistoryItem(setHistory, { status: "success", title: "Recovered payment validated", detail: `${plan.name || "Plan"} - installment #${attempt.sequence + 1} was confirmed by the ledger after the reload.` });
+              logEvent("recovery.attempt_validated", { personId: plan.id, key: attemptKey });
+            } else if (outcome === OUTCOMES.FAILURE) {
+              settleRecoveredAttempt(plan.id, attemptKey, { ...attempt, status: "validated_failure" });
+              addHistoryItem(setHistory, { status: "failed", title: "Recovered payment failed", detail: `${plan.name || "Plan"} - installment #${attempt.sequence + 1} did not succeed on the ledger; retry is a fresh decision.` });
+              logEvent("recovery.attempt_failed", { personId: plan.id, key: attemptKey });
+            } else {
+              // still_unknown: the installment stays blocked and the card
+              // shows the verifying state. Reconciliation re-runs on the next
+              // tick, mount, or Reconcile now — never a retry.
+              settleRecoveredAttempt(plan.id, attemptKey, { ...attempt, status: "unresolved" });
+              logEvent("recovery.still_unknown", { personId: plan.id, key: attemptKey });
+            }
+          }
+        } finally {
+          reconcilingKeysRef.current.delete(attemptKey);
+        }
+      }
+    }
+    return recoveredAdvances;
+  };
+
+  // Tick- and manual-facing reconciliation (audit violation 5): classify
+  // every hashed unresolved attempt against the ledger. Runs on the 10s
+  // scheduler tick, once on mount, and on an explicit "Reconcile now" —
+  // never on a timer of its own, never with a retry.
+  const reconcileUnresolved = async () => {
+    if (recoveryInFlightRef.current) return;
+    recoveryInFlightRef.current = true;
+    try {
+      const plans = peopleRef.current;
+      if (plans.length === 0) return;
+      await runReconcilePass(plans, { live: true });
+    } finally {
+      recoveryInFlightRef.current = false;
+    }
+  };
+
+  // Restore-time recovery: the miss assessment (catch-up approval) belongs to
+  // mount only — the tick must never fire it.
   const runRecovery = async () => {
     if (recoveryInFlightRef.current) return;
     recoveryInFlightRef.current = true;
@@ -1478,52 +1592,8 @@ export default function CadenceDashboard() {
       // Pre-recovery schedule snapshot: missed windows are counted against
       // the nextRunAt the plan had when the session opened, so a reconciled
       // success (which moves it) cannot erase the windows behind it.
-      const preNextRunAt = new Map();
-      const recoveredAdvances = new Map();
-
-      // Phase A — reconcile (never dispatches).
-      for (const plan of plans) {
-        preNextRunAt.set(plan.id, plan.nextRunAt);
-        recoveredAdvances.set(plan.id, 0);
-        for (const attempt of Object.values(plan.attempts || {})) {
-          const action = mountAttemptAction(attempt);
-          if (action === "none") continue;
-          const key = installmentId(plan.id, attempt.sequence);
-          if (reconcilingKeysRef.current.has(key)) continue;
-          reconcilingKeysRef.current.add(key);
-          try {
-            if (action === "record-failed") {
-              // The wallet prompt died with the previous session: nothing was
-              // submitted, so there is nothing to reconcile — a failed attempt
-              // the card surfaces. Never an advance, never an auto-retry.
-              settleRecoveredAttempt(plan.id, key, { ...attempt, status: "validated_failure" });
-              addHistoryItem(setHistory, { status: "failed", title: "Recovered attempt failed", detail: `${plan.name || "Plan"} - installment #${attempt.sequence + 1} was awaiting wallet confirmation when the app closed; nothing was submitted.` });
-              logEvent("recovery.attempt_recorded_failed", { personId: plan.id, key });
-            } else {
-              logEvent("recovery.reconcile_started", { personId: plan.id, key, hash: attempt.hash ? `${String(attempt.hash).slice(0, 10)}...` : null });
-              const { outcome } = await lookupTransaction(attempt.hash);
-              if (outcome === OUTCOMES.SUCCESS) {
-                settleRecoveredAttempt(plan.id, key, { ...attempt, status: "validated_success" }, { advance: true });
-                recoveredAdvances.set(plan.id, (recoveredAdvances.get(plan.id) || 0) + 1);
-                addHistoryItem(setHistory, { status: "success", title: "Recovered payment validated", detail: `${plan.name || "Plan"} - installment #${attempt.sequence + 1} was confirmed by the ledger after the reload.` });
-                logEvent("recovery.attempt_validated", { personId: plan.id, key });
-              } else if (outcome === OUTCOMES.FAILURE) {
-                settleRecoveredAttempt(plan.id, key, { ...attempt, status: "validated_failure" });
-                addHistoryItem(setHistory, { status: "failed", title: "Recovered payment failed", detail: `${plan.name || "Plan"} - installment #${attempt.sequence + 1} did not succeed on the ledger; retry is a fresh decision.` });
-                logEvent("recovery.attempt_failed", { personId: plan.id, key });
-              } else {
-                // still_unknown: the installment stays blocked and the card
-                // shows the verifying state. Reconciliation re-runs on the
-                // next mount or via Reconcile now — never a timer loop.
-                settleRecoveredAttempt(plan.id, key, { ...attempt, status: "unresolved" });
-                logEvent("recovery.still_unknown", { personId: plan.id, key });
-              }
-            }
-          } finally {
-            reconcilingKeysRef.current.delete(key);
-          }
-        }
-      }
+      const preNextRunAt = new Map(plans.map((plan) => [plan.id, plan.nextRunAt]));
+      const recoveredAdvances = await runReconcilePass(plans);
 
       // Phase B — missed windows, assessed AFTER reconciliation. Only active
       // plans with a dispatchable next installment are counted (paused plans
@@ -1536,7 +1606,7 @@ export default function CadenceDashboard() {
         const paidCount = Number(plan.paidCount || 0);
         const remaining = getSchedule(plan).payments - paidCount;
         if (remaining <= 0) return plan;
-        if (dispatchBlockReason(plan.attempts?.[installmentId(plan.id, paidCount)])) return plan;
+        if (dispatchBlockReason(latestAttemptFor(plan, paidCount))) return plan;
         const missed = Math.max(
           0,
           countMissedWindows({ nextRunAt: preNextRunAt.get(plan.id), frequencyMs: getFrequencyMs(plan), remaining, now })
@@ -1610,11 +1680,19 @@ export default function CadenceDashboard() {
 
   const reconcileNow = (person) => {
     logEvent("recovery.manual_reconcile", { personId: person.id, name: person.name });
-    void runRecovery();
+    // Manual reconcile classifies held attempts only — the missed-window
+    // assessment is a mount-time decision, so clicking Reconcile now can
+    // never mint a new catch-up prompt.
+    void reconcileUnresolved();
   };
 
   useEffect(() => {
     const timer = window.setInterval(() => {
+      // Reconcile first (audit violation 5): a hashed unresolved attempt can
+      // settle on the very tick that is still blocking it, so a validated
+      // success resumes scheduling without waiting for a relaunch. The pass
+      // never dispatches and never retries.
+      void reconcileUnresolved();
       // Every due plan gets its own dispatch; the guarded door serializes per
       // installment (plan A's in-flight payment never blocks plan B's due
       // tick, and no entry point can double-send one installment). Catch-up

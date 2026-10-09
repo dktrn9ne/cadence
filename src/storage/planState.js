@@ -32,8 +32,24 @@ const asSequence = (value) => {
 
 const installmentKey = (planId, sequence) => `${planId}:${sequence}`;
 
+// Attempts are numbered per installment: every retry writes its OWN record
+// (`${planId}:${sequence}#${attemptNo}`), so attempt history survives — a
+// retry never overwrites the evidence of the attempt before it (audit
+// art_FIvT05e6, violation 4). Legacy envelopes predate attemptNo; they
+// re-key onto #1.
+const asAttemptNo = (value) => {
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n >= 1 ? n : 1;
+};
+
+export const attemptKey = (planId, sequence, attemptNo) =>
+  `${installmentKey(planId, sequence)}#${asAttemptNo(attemptNo)}`;
+
 // Returns an allowlisted attempt record, or null when the entry cannot be
 // keyed (no valid sequence) — corrupt entries are dropped, never repaired.
+// payer/destination/amount carry the attempt's payment identity so a ledger
+// lookup can prove a transaction IS this attempt's payment before its
+// verdict may classify anything (audit violation 1).
 function sanitizeAttempt(attempt) {
   if (!attempt || typeof attempt !== "object") return null;
   const sequence = asSequence(attempt.sequence);
@@ -44,11 +60,14 @@ function sanitizeAttempt(attempt) {
     hash: asHash(attempt.hash),
     submittedAt: asStamp(attempt.submittedAt),
     amount: asString(attempt.amount),
+    payer: asString(attempt.payer),
+    destination: asString(attempt.destination),
+    attemptNo: asAttemptNo(attempt.attemptNo),
   };
 }
 
-// Re-derives every attempt key from its own sequence, so the map is always
-// keyed by the deterministic `${planId}:${sequence}` id whatever key the
+// Re-derives every attempt key from its own sequence + attempt number, so the
+// map is always keyed by the deterministic per-attempt id whatever key the
 // (possibly drifted) stored entry arrived under.
 function sanitizeAttempts(attempts, planId) {
   if (!attempts || typeof attempts !== "object") return {};
@@ -56,9 +75,22 @@ function sanitizeAttempts(attempts, planId) {
   for (const entry of Object.values(attempts)) {
     const attempt = sanitizeAttempt(entry);
     if (!attempt) continue;
-    next[installmentKey(planId, attempt.sequence)] = attempt;
+    next[attemptKey(planId, attempt.sequence, attempt.attemptNo)] = attempt;
   }
   return next;
+}
+
+// The newest attempt for an installment — the record the dispatch guard and
+// the missed-window assessment must read. Earlier attempts remain in storage
+// as history and are never consulted for the guard.
+export function latestAttemptFor(plan, sequence) {
+  const wanted = Number(sequence);
+  let latest = null;
+  for (const entry of Object.values(plan?.attempts || {})) {
+    if (Number(entry?.sequence) !== wanted) continue;
+    if (!latest || Number(entry.attemptNo) > Number(latest.attemptNo)) latest = entry;
+  }
+  return latest;
 }
 
 // Public schedule/display fields. Without these a restored plan cannot render
@@ -183,10 +215,10 @@ export function flushPlans() {
   if (envelope) writeEnvelope(envelope);
 }
 
-// Pure update: upserts the allowlisted attempt for `${planId}:${sequence}`.
-// Returns a new plans array, or the SAME reference when nothing changed
-// (unknown plan, invalid attempt) so callers can detect the no-op without a
-// deep compare. Never throws.
+// Pure update: upserts the allowlisted attempt under its per-attempt key
+// (`${planId}:${sequence}#${attemptNo}`). Returns a new plans array, or the
+// SAME reference when nothing changed (unknown plan, invalid attempt) so
+// callers can detect the no-op without a deep compare. Never throws.
 export function applyAttempt(plans, planId, attempt) {
   if (!Array.isArray(plans) || plans.length === 0) return plans;
   const sanitized = sanitizeAttempt(attempt);
@@ -194,7 +226,7 @@ export function applyAttempt(plans, planId, attempt) {
   const index = plans.findIndex((plan) => plan && plan.id === planId);
   if (index === -1) return plans;
   const current = plans[index];
-  const key = installmentKey(planId, sanitized.sequence);
+  const key = attemptKey(planId, sanitized.sequence, sanitized.attemptNo);
   return [
     ...plans.slice(0, index),
     { ...current, attempts: { ...(current.attempts || {}), [key]: sanitized } },
@@ -207,14 +239,18 @@ export function applyAttempt(plans, planId, attempt) {
 // reconciled after — so they bypass the savePlans debounce window. Any
 // pending debounced save is cancelled: the immediate write persists the
 // newest full envelope, so the pending one is stale the moment this lands.
+// Returns { plans, persisted }: persisted is false when the record did NOT
+// land durably (no-op, or the storage write failed). The dispatcher treats a
+// false as fail-closed — an untracked payment is how double-pays happen
+// (audit violation 3).
 export function recordAttempt(plans, planId, attempt) {
   const next = applyAttempt(plans, planId, attempt);
-  if (next === plans) return plans;
+  if (next === plans) return { plans, persisted: false };
   if (pendingTimer !== null) {
     clearTimeout(pendingTimer);
     pendingTimer = null;
     pendingEnvelope = null;
   }
-  writeEnvelope(buildEnvelope(next));
-  return next;
+  const persisted = writeEnvelope(buildEnvelope(next));
+  return { plans: next, persisted };
 }

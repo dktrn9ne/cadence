@@ -9,27 +9,48 @@
 // dispatcher; recovery classifies and surfaces, and the plan resumes through
 // the normal scheduling and approval flows.
 
-// What mount reconciliation must do with a persisted attempt. The persisted
+// What a reconciliation pass must do with a persisted attempt. The persisted
 // statuses map onto exactly three actions:
 //
 //   - "reconcile"     — submitted | unresolved: a hash exists, so the ledger
 //                       can classify it by lookup. This is the ONLY exit from
-//                       an unknown outcome (never a timer, never a retry).
-//   - "record-failed" — awaiting_signature: the wallet prompt died with the
-//                       previous session. Nothing was submitted, so there is
-//                       no hash to reconcile — a failed attempt is recorded
-//                       (never an advance, never an auto-retry).
+//                       an unknown outcome (never a timer, never a retry). A
+//                       duplicate lookup for an attempt the dispatcher is
+//                       still settling is idempotent — both passes read the
+//                       same ledger answer, and the sequence-guarded advance
+//                       makes the second one a no-op.
+//   - "record-unresolved" — awaiting_signature: whether the submission
+//                       happened is unknowable by construction (audit
+//                       art_FIvT05e6, violation 2) — the attempt parks in
+//                       `unresolved`, blocked and surfaced, NEVER in the
+//                       retryable `validated_failure` state: a blind retry
+//                       after a landed payment is the double-pay this rule
+//                       exists to keep closed.
 //   - "none"          — validated_success | validated_failure: terminal, and
 //                       unrecognized statuses too — those keep blocking via
 //                       the attempt guard (fail closed), so recovery leaves
 //                       them exactly as stored.
-export function mountAttemptAction(attempt) {
+//
+// Session awareness (`live`): a pass on a MOUNT can never race a dispatch —
+// every record it sees belongs to a dead session, so any awaiting_signature
+// is orphaned and expires. A pass on a LIVE tick must not expire an attempt
+// whose wallet prompt is open right now (the dispatcher owns it and will
+// settle it); only one that has outlived ATTEMPT_STALE_MS — a crashed or
+// hung prompt — may expire, and it expires to unresolved, never to failure.
+export const ATTEMPT_STALE_MS = 5 * 60 * 1000;
+
+export function mountAttemptAction(attempt, { now = Date.now(), live = false } = {}) {
   switch (attempt?.status) {
     case "submitted":
     case "unresolved":
       return "reconcile";
-    case "awaiting_signature":
-      return "record-failed";
+    case "awaiting_signature": {
+      if (!live) return "record-unresolved";
+      // For an awaiting_signature record, submittedAt is the moment the
+      // attempt was recorded (the submit itself had not started).
+      const recordedAt = Number(attempt?.submittedAt ?? 0);
+      return now - recordedAt > ATTEMPT_STALE_MS ? "record-unresolved" : "none";
+    }
     default:
       return "none";
   }
