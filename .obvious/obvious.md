@@ -36,8 +36,9 @@ proof. Dev-server health check: `curl -sf http://127.0.0.1:5173/`.
 |---|---|
 | `src/main.jsx` | React entry; mounts `CadenceDashboard` into `#root` |
 | `src/CadenceDashboard.jsx` | The UI: opening/connect screen, employer + employee dashboards, income proof, payment flows, XRPL signing |
-| `src/domain/` | Pure logic: XRPL constants (`xrpl-constants.js`), schedule math (`schedule.js`), payment builders (`payments.js`) |
-| `src/services/` | I/O over wallet SDKs: payment submitters (`payments.js`), Crossmark/xrpl-connect accessors (`wallet-connection.js`) |
+| `src/domain/` | Pure logic: XRPL constants (`xrpl-constants.js`), schedule math (`schedule.js`), payment builders (`payments.js`), installment state machine (`installment.js`) |
+| `src/services/` | I/O over wallet SDKs: payment submitters (`payments.js`), Crossmark/xrpl-connect accessors (`wallet-connection.js`), transaction-hash reconciliation (`xrplLedger.js`) |
+| `src/storage/` | Durable state: versioned plan/attempt store (`planState.js`) |
 | `src/brand/` | Presentation identity: tokens (`tokens.js`, midnight palette + theme), `CadenceMark.jsx`, `app-icon.png` |
 | `tests/` | Vitest suites: `app.smoke.test.jsx` (render smoke), domain/service contract tests, token pins |
 | `.github/workflows/ci.yml` | GitHub Actions: `npm ci`, `npm test -- --run`, `npm run build`, dist artifact |
