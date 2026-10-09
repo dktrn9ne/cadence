@@ -1663,8 +1663,12 @@ export default function CadenceDashboard() {
     <>
       <style>{`
         * { box-sizing: border-box; }
+        /* Height chain: html and body must always reach the viewport so the
+           midnight canvas paints edge-to-edge even if a screen renders short. */
+        html { min-height: 100%; }
         body {
           margin: 0;
+          min-height: 100%;
           background:
             linear-gradient(90deg, ${theme.fillSoft} 1px, transparent 1px),
             linear-gradient(180deg, ${theme.fillSoft} 1px, transparent 1px),
@@ -1677,7 +1681,7 @@ export default function CadenceDashboard() {
         button { cursor: pointer; }
         button:disabled { cursor: not-allowed; opacity: .55; }
         .button:focus-visible, .text-button:focus-visible, .modal-close:focus-visible, a:focus-visible { outline: 2px solid ${theme.accent2}; outline-offset: 2px; }
-        .center-screen { min-height: 100vh; display: grid; place-items: center; padding: 28px; position: relative; overflow: hidden; }
+        .center-screen { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 28px; position: relative; overflow: hidden; }
         .intro-screen { background: ${theme.bg}; }
         .intro-card, .setup-card { width: min(100%, 540px); position: relative; z-index: 1; }
         .intro-card { padding: 46px 48px; background: ${theme.bgRaised}; border: 1px solid ${theme.hairline}; border-radius: 20px; box-shadow: 0 24px 70px rgba(0,0,0,.45); text-align: center; overflow: hidden; }
@@ -1737,7 +1741,7 @@ export default function CadenceDashboard() {
         .error-message, .success-message { padding: 11px 13px; border-radius: 10px; font-size: 12px; line-height: 1.4; margin-bottom: 14px; }
         .error-message { color: ${theme.danger}; background: ${theme.dangerSoft}; }
         .success-message { color: ${theme.success}; background: color-mix(in srgb, ${theme.success} 12%, transparent); margin-top: 16px; }
-        .app-shell { min-height: 100vh; background: transparent; position: relative; overflow: hidden; }
+        .app-shell { min-height: 100vh; min-height: 100dvh; background: transparent; position: relative; overflow: hidden; }
         .topbar { position: relative; z-index: 2; height: 74px; padding: 0 clamp(20px, 5vw, 76px); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid ${theme.hairline}; background: ${theme.bgOverlay}; backdrop-filter: blur(12px); }
         .topbar-right, .wallet-chip, .welcome-row, .balance-actions, .card-heading, .details-top, .details-actions, .payer-strip { display: flex; align-items: center; }
         .topbar-right { gap: 12px; }
