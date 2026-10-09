@@ -23,9 +23,10 @@ npm run desktop:dev    # starts Vite if not running, then Electron window (CADEN
 npm run build          # production build → dist/
 npm run desktop        # build then launch Electron with built assets
 npm run preview        # serve dist/
+npm test               # vitest run — full suite once, never watches
 ```
 
-There are **no lint, typecheck, or test scripts** — `npm run build` is the available static
+There is **no lint or typecheck** — `npm test` and `npm run build` are the available static
 proof. Dev-server health check: `curl -sf http://127.0.0.1:5173/`.
 
 ## Codebase map
@@ -34,6 +35,8 @@ proof. Dev-server health check: `curl -sf http://127.0.0.1:5173/`.
 |---|---|
 | `src/main.jsx` | React entry; mounts `CadenceDashboard` into `#root` |
 | `src/StreamPayDashboard.jsx` | The entire UI: opening/connect screen, employer + employee dashboards, income proof, payment flows, XRPL signing |
+| `src/domain/` | Pure logic modules, no I/O: installment state machine (`installment.js`) |
+| `src/smoke.test.js` and colocated `*.test.js` | Vitest suites, run by `npm test` |
 | `streampay-dashboard.jsx` | Root-level copy of the dashboard component (kept in sync manually; not imported by the app) |
 | `electron/main.cjs` | Electron main process; window creation, renderer console logging, dev-server URL via `CADENCE_DEV_SERVER_URL` |
 | `electron/dev-runner.cjs` | Waits for Vite on 127.0.0.1:5173, spawns Electron |
