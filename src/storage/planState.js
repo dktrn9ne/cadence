@@ -8,9 +8,81 @@
 // safeLogPayload redaction (src/StreamPayDashboard.jsx), which scrubs by key
 // name after the fact: an allowlist cannot forget a new secret-shaped field.
 
+import { canonicalJson } from "./paymentsStore.js";
+
 const STORAGE_KEY = "cadence-plans-v1"; // versioned; bump = migrate, never reinterpret
 const CURRENT_VERSION = 1;
 const SAVE_DEBOUNCE_MS = 300;
+// Quarantine key mirrors the record document's convention: a corrupt or
+// unrecognized payload is copied aside for recovery, never reinterpreted.
+const QUARANTINE_KEY = `${STORAGE_KEY}.quarantine`;
+
+// --- load/save status channel -----------------------------------------------
+//
+// planState loads synchronously (the dashboard's useState initializer), so
+// load-time failures cannot throw to a React boundary — they publish a status
+// the durable-payments hook folds into the storage banner and the dispatch
+// gate. States mirror the banner's known tones (see StorageBanner): ready,
+// corrupt, unknown_version, write_failed, invalid_rows.
+
+const STATUS_STATES = Object.freeze(["ready", "corrupt", "unknown_version", "write_failed", "invalid_rows"]);
+let currentStatus = { state: "ready", message: "" };
+const statusListeners = new Set();
+
+export function getPlanStateStatus() {
+  return currentStatus;
+}
+
+export function subscribePlanStateStatus(listener) {
+  statusListeners.add(listener);
+  // Same guard publishStatus applies: one broken listener must not break
+  // subscribing or its peers.
+  try {
+    listener(currentStatus);
+  } catch (error) {
+    console.warn("[planState] status listener failed:", error);
+  }
+  return () => {
+    statusListeners.delete(listener);
+  };
+}
+
+// Acknowledgement clears the visible failure after quarantine — the payload
+// stays aside for recovery and the app runs on its (empty) in-memory state,
+// which cannot dispatch anything.
+export function acknowledgePlanStateIssue() {
+  publishStatus("ready", "");
+}
+
+function publishStatus(state, message) {
+  if (!STATUS_STATES.includes(state)) return;
+  currentStatus = { state, message };
+  for (const listener of statusListeners) {
+    try {
+      listener(currentStatus);
+    } catch (error) {
+      // A broken listener must not break the write path — surface, continue.
+      console.warn("[planState] status listener failed:", error);
+    }
+  }
+}
+
+// --- integrity --------------------------------------------------------------
+//
+// A synchronous integrity tripwire over the canonical form. loadPlans must
+// stay synchronous (useState initializer), so this is a non-cryptographic
+// FNV-1a rather than the record document's crypto.subtle checksum. It
+// detects accidental corruption and hand edits; it is not a defense against
+// someone who can rewrite localStorage (they can recompute any checksum).
+function envelopeChecksum(payload) {
+  const canonical = canonicalJson(payload);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < canonical.length; i += 1) {
+    hash ^= canonical.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `fnv1a-${hash.toString(16).padStart(8, "0")}-${canonical.length}`;
+}
 
 // --- allowlist coercion -----------------------------------------------------
 
@@ -99,11 +171,14 @@ function sanitizePlan(plan) {
 }
 
 function buildEnvelope(plans) {
-  return {
+  const envelope = {
     version: CURRENT_VERSION,
     savedAt: Date.now(),
     plans: (Array.isArray(plans) ? plans : []).map(sanitizePlan).filter(Boolean),
   };
+  // The checksum covers everything except itself (symmetric with readEnvelope).
+  envelope.checksum = envelopeChecksum(envelope);
+  return envelope;
 }
 
 // --- storage I/O ------------------------------------------------------------
@@ -114,41 +189,99 @@ let pendingTimer = null;
 function writeEnvelope(envelope) {
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
+    // Recovery visibility: clear a write failure once a write lands again.
+    // A load-time status (corrupt/invalid_rows) is NOT cleared here — those
+    // describe quarantined data, not a transient write problem.
+    if (currentStatus.state === "write_failed") publishStatus("ready", "");
     return true;
   } catch (err) {
     // Quota/private-mode failures must not crash the payment flow, but the
     // failure stays visible — a silent drop here would look exactly like a
     // lost attempt record.
     console.warn("[planState] failed to persist plan state:", err);
+    publishStatus("write_failed", "Plans are not persisting — payments will not survive a restart. Dispatch is paused until storage writes succeed.");
     return false;
   }
 }
 
-function readEnvelope(parsed) {
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
-  if (parsed.version !== CURRENT_VERSION) {
-    // A version bump means migrate forward; an unknown version means the
-    // bytes were written by newer/other code — start from defaults rather
-    // than reinterpret what we do not understand.
-    console.warn("[planState] unknown storage version, using defaults:", parsed.version);
-    return [];
+function quarantinePlans(raw, reason, version) {
+  const payload = { reason, quarantinedAt: new Date().toISOString(), raw };
+  if (version !== undefined) payload.version = version;
+  try {
+    window.localStorage.setItem(QUARANTINE_KEY, JSON.stringify(payload));
+  } catch (error) {
+    // Quarantine is best-effort: the corrupt payload is at least out of the
+    // live key path after the next successful write.
+    console.warn("[planState] could not write quarantine payload:", error);
   }
-  if (!Array.isArray(parsed.plans)) return [];
-  return parsed.plans.map(sanitizePlan).filter(Boolean);
+}
+
+// Reads one parsed envelope into { plans, dropped }, or a failure shape:
+// { unknownVersion } or { corrupt }. Legacy envelopes without a checksum are
+// accepted (they predate the integrity tripwire).
+function readEnvelope(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { plans: [], dropped: 0 };
+  if (parsed.version !== CURRENT_VERSION) {
+    return { unknownVersion: parsed.version };
+  }
+  if (parsed.checksum !== undefined) {
+    const { checksum, ...payload } = parsed;
+    if (envelopeChecksum(payload) !== checksum) {
+      return { corrupt: "checksum_mismatch" };
+    }
+  }
+  const rows = Array.isArray(parsed.plans) ? parsed.plans : [];
+  const plans = [];
+  let dropped = 0;
+  for (const row of rows) {
+    const plan = sanitizePlan(row);
+    if (plan) plans.push(plan);
+    else dropped += 1;
+  }
+  return { plans, dropped };
 }
 
 // --- public API -------------------------------------------------------------
 
-// Restores the persisted plans array. Malformed JSON, unknown versions, and
-// unavailable storage all resolve to safe defaults — this runs at mount and
-// must never throw.
+// Restores the persisted plans array. Malformed JSON, checksum failures,
+// unknown versions, and unavailable storage all resolve to safe defaults —
+// this runs at mount and must never throw. Failures that mean "the stored
+// bytes are not ours" quarantine the raw payload and publish a status; the
+// durable-payments hook folds that into the banner and dispatch gate.
 export function loadPlans() {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
-    return readEnvelope(JSON.parse(raw));
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      quarantinePlans(raw, "unparseable_json");
+      publishStatus("corrupt", "Stored plan state is corrupt — it was quarantined and the app starts without it.");
+      return [];
+    }
+    const read = readEnvelope(parsed);
+    if (read.corrupt) {
+      quarantinePlans(raw, read.corrupt);
+      publishStatus("corrupt", "Stored plan state failed its integrity check — it was quarantined and the app starts without it.");
+      return [];
+    }
+    if (read.unknownVersion !== undefined) {
+      // An unknown version means the bytes were written by newer/other code —
+      // quarantined, never guessed at or downgraded.
+      quarantinePlans(raw, "unknown_version", read.unknownVersion);
+      publishStatus("unknown_version", `Stored plan state was written by a newer version (${read.unknownVersion}) — it was quarantined, never guessed at.`);
+      return [];
+    }
+    if (read.dropped > 0) {
+      publishStatus("invalid_rows", `${read.dropped} stored plan${read.dropped === 1 ? " was" : "s were"} excluded for having an invalid form — re-add from the editor.`);
+    }
+    return read.plans;
   } catch (err) {
     console.warn("[planState] could not load plan state, using defaults:", err);
+    // Read-path failure (e.g. privacy-mode storage): start empty; the first
+    // write attempt will surface write_failed and halt dispatch if writes
+    // fail there too.
     return [];
   }
 }
