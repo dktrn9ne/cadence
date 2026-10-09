@@ -4,7 +4,8 @@ import { theme } from "./brand/tokens.js";
 import { CadenceLockup, CadenceMark } from "./brand/CadenceMark.jsx";
 import { RLUSD_CURRENCY, RLUSD_ISSUER, CADENCE_EMPLOYER_WALLET, SOURCE_TAG } from "./domain/xrpl-constants.js";
 import { TIME_UNITS, FREQUENCIES, getSchedule, getFrequencyMs } from "./domain/schedule.js";
-import { buildRlusdPayment, buildCrossmarkRlusdPayment, responseHash } from "./domain/payments.js";
+import { getXrplConnect } from "./services/wallet-connection.js";
+import { submitRlusdPayment, submitXrplConnectRlusdPayment } from "./services/payments.js";
 
 const LOG_STORAGE_KEY = "cadence-debug-logs-v1";
 const MAX_LOGS = 500;
@@ -289,62 +290,6 @@ const createWalletFromInput = (method, value, expectedAddress = "") => {
   }
 };
 
-const getCrossmark = async () => {
-  const module = await import("@crossmarkio/sdk");
-  return module.default || module;
-};
-
-const getXrplConnect = async () => import("@textrp/xrpl-connect");
-
-const connectCrossmarkWallet = async () => {
-  const crossmark = await getCrossmark();
-  const detected = await crossmark.async.detect(2000);
-  if (!detected && !crossmark.sync.isInstalled?.()) {
-    throw new Error("Crossmark was not detected. Install or unlock Crossmark, then try again.");
-  }
-  await crossmark.async.connect(5000).catch(() => false);
-  const signIn = await crossmark.async.signInAndWait();
-  const address =
-    signIn?.response?.data?.address ||
-    signIn?.response?.data?.account ||
-    signIn?.data?.address ||
-    signIn?.data?.account ||
-    crossmark.sync.getAddress?.();
-  if (!address?.startsWith("r")) {
-    throw new Error("Crossmark did not return a valid XRPL address.");
-  }
-  return { address, signIn };
-};
-
-const submitCrossmarkRlusdPayment = async ({ account, destination, amount }) => {
-  const crossmark = await getCrossmark();
-  const payment = buildCrossmarkRlusdPayment({ account, destination, amount });
-  const result = await crossmark.async.signAndSubmitAndWait(payment);
-  return { result, hash: responseHash(result), transaction: payment };
-};
-
-const submitXrplConnectRlusdPayment = async ({ manager, account, destination, amount }) => {
-  if (!manager?.connected) {
-    throw new Error("Connect an XRPL wallet first.");
-  }
-  const payment = buildCrossmarkRlusdPayment({ account, destination, amount });
-  const result = await manager.signAndSubmit(payment);
-  return { result, hash: responseHash(result), transaction: payment };
-};
-
-const submitRlusdPayment = async ({ wallet, destination, amount }) => {
-  const client = new Client("wss://s1.ripple.com");
-  await client.connect();
-  try {
-    const transaction = buildRlusdPayment({ wallet, destination, amount });
-    const prepared = await client.autofill(transaction);
-    const signed = wallet.sign(prepared);
-    const result = await client.submitAndWait(signed.tx_blob);
-    return { result, hash: signed.hash, transaction };
-  } finally {
-    await client.disconnect();
-  }
-};
 const readRlusdBalance = async (address) => {
   if (!address || !address.startsWith("r")) {
     return 0;
