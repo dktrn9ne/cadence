@@ -58,6 +58,10 @@ describe("Cadence opening flow (web)", () => {
     expect(
       screen.getByRole("button", { name: /connect xrpl wallet/i })
     ).toBeDefined();
+    // Web-mode intro form carries the connect action (folded from the earlier
+    // foundation-branch smoke test).
+    expect(document.querySelector("p.eyebrow")?.textContent).toBe("Connect XRPL wallet");
+    expect(document.querySelector("form.intro-connect-form")).not.toBeNull();
     expect(renderedConnector()).not.toBeNull();
     // Web mode, not the desktop seed-import form.
     expect(screen.queryByText(/wallet import type/i)).toBeNull();
