@@ -13,7 +13,7 @@
 // is a final failure or unresolved — unresolved never releases the attempt
 // lock and never licenses a retry.
 
-import { OUTCOME_STATES } from "../domain/paymentOutcome.js";
+import { OUTCOME_STATES, isFinalFailure } from "../domain/paymentOutcome.js";
 
 // A `tx` lookup for a transaction that is not in a validated ledger yet
 // rejects with a RippledError whose .data is the rippled error response —
@@ -30,8 +30,9 @@ const isTxnNotFound = (error) => error?.data?.error === "txnNotFound";
 // Final failure classes on XRPL: tec* (claim failure), tef* (terminal local
 // failure), tel* (local failure), tem* (malformed) — the transaction reached a
 // final non-success state. tesSUCCESS is the only success code; any other
-// verdict is treated as unresolved below, never guessed.
-const FINAL_FAILURE = /^te[cflm]/i;
+// verdict is treated as unresolved below, never guessed. The canonical test
+// (isFinalFailure) lives in the domain module so the reconciler and the
+// receipt classifier share one definition.
 
 // Identity match BEFORE any classification: the looked-up transaction must be
 // the payment this attempt describes — payer, destination, the exact RLUSD
@@ -116,7 +117,7 @@ export function createReconciler({ fetchTransaction } = {}) {
     if (verdict === "tesSUCCESS") {
       return { next: OUTCOME_STATES.validated_success, ledgerResult: verdict };
     }
-    if (FINAL_FAILURE.test(verdict)) {
+    if (isFinalFailure(verdict)) {
       return { next: OUTCOME_STATES.validated_failure, ledgerResult: verdict };
     }
     return { next: OUTCOME_STATES.unresolved };

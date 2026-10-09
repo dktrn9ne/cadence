@@ -4,7 +4,12 @@ import { theme } from "./brand/tokens.js";
 import { CadenceLockup, CadenceMark } from "./brand/CadenceMark.jsx";
 import { RLUSD_CURRENCY, RLUSD_ISSUER, SOURCE_TAG } from "./domain/xrpl-constants.js";
 import { TIME_UNITS, FREQUENCIES, getSchedule, getFrequencyMs } from "./domain/schedule.js";
-import { installmentId as makeInstallmentId } from "./domain/paymentOutcome.js";
+import {
+  applyValidatedFailureRetry,
+  applyValidatedSuccess,
+  classifySubmitError,
+} from "./domain/paymentOutcome.js";
+import * as attemptStore from "./storage/attemptStore.js";
 import { normalizeSubmitOutcome } from "./services/normalizeOutcome.js";
 import {
   buildIncomeProofCsv,
@@ -16,7 +21,9 @@ import {
   selectIncomeRows,
   stampPlanPayer,
 } from "./domain/incomeProof";
-import { createAttempt, getActiveAttempt, updateAttempt } from "./storage/attemptStore.js";
+import { createReconciler } from "./services/ledgerReconciler.js";
+import { fetchValidatedTransaction } from "./services/ledgerClient.js";
+import { createPaymentDispatch } from "./services/paymentDispatch.js";
 import { getXrplConnect } from "./services/wallet-connection.js";
 import { submitRlusdPayment, submitXrplConnectRlusdPayment } from "./services/payments.js";
 
@@ -44,6 +51,20 @@ const MNEMONIC_DERIVATION_OPTIONS = Array.from({ length: 10 }, (_, index) => [
     options: { derivationPath: `m/44'/144'/${index}'/0/0`, algorithm: ECDSA.secp256k1 },
   },
 ]).flat();
+
+// Guarded-dispatch wiring (spec art_XPj3pWA4, "What we build" 5): the
+// reconciler's ledger lookup is the only injected I/O; the dispatch flow and
+// the reconciliation pass consume the shared outcome machine, the durable
+// attempt store, and the response normalizer. The component owns no outcome
+// decisions — it renders events and applies plan mutations exclusively on
+// validated_success.
+const ledgerReconciler = createReconciler({ fetchTransaction: fetchValidatedTransaction });
+const paymentDispatch = createPaymentDispatch({
+  attemptStore,
+  normalizeSubmitOutcome,
+  classifySubmitError,
+  reconciler: ledgerReconciler,
+});
 
 const emptyPerson = {
   name: "",
@@ -1170,7 +1191,99 @@ export default function CadenceDashboard() {
       hasDestination: Boolean(person.address?.startsWith("r")),
       schedule: getSchedule(person),
     });
-    if (ready) window.setTimeout(() => payInstallment({ ...person, active: true, nextRunAt: Date.now() }, "scheduled"), 150);
+    if (ready) window.setTimeout(() => payInstallment({ ...person, active: true, nextRunAt: Date.now() }, "auto_start"), 150);
+  };
+
+  // Latest-person ref for payment events: events arrive from async flows
+  // (in-flight submissions, reconciliation passes) started under older
+  // renders. State mutations always use functional updates; only the cosmetic
+  // name/total inside messages reads this ref.
+  const peopleRef = useRef(people);
+  peopleRef.current = people;
+
+  // The single payment-event handler: names the real outcome state (spec's
+  // message table) and applies plan mutations. ONLY validated_success touches
+  // paidCount, nextRunAt, or plan completion (locked decision 3);
+  // validated_failure defers the same installment's retry without counting,
+  // and unresolved never reschedules — the attempt lock holds.
+  const handlePaymentEvent = (event) => {
+    const { type, record, label, reason, anomaly, errorClass, source, planId, sequence, error } = event;
+    const planNow = peopleRef.current.find((person) => person.id === record?.planId);
+    const name = label ?? planNow?.name ?? record?.planId ?? "plan";
+    switch (type) {
+      case "lock_refused":
+        // Absorbed from PR #9's pre-check: an accurate manual lock message.
+        // Scheduled/auto-start refusals log only, so tick collisions never
+        // spam the message surface or the history feed.
+        logEvent("payment.blocked.attempt_active", { planId: record?.planId, sequence: record?.sequence, source, activeAttemptId: record?.id, activeState: record?.state });
+        if (source === "manual") {
+          setPaymentMessage(`${name}'s installment is already in flight — wait for the active attempt to resolve before retrying.`);
+          addHistoryItem(setHistory, { status: "waiting", title: "Installment locked", detail: `${name} - installment ${record?.planId}:${record?.sequence} already has an active attempt (${record?.state}).` });
+        }
+        break;
+      case "store_failed":
+        // Fail closed (absorbed from PR #9): an installment is never paid
+        // without a durable attempt record — an untracked payment is how
+        // double-pays happen. The dispatch guarantees nothing was submitted.
+        setPaymentMessage("Cadence could not record the installment attempt before paying, so the payment was blocked. Try again.");
+        addHistoryItem(setHistory, { status: "failed", title: "Attempt not recorded", detail: `${name} - installment ${planId}:${sequence} was blocked before any transaction was built.` });
+        logEvent("payment.attempt.store_failed", { planId, sequence, error: safeLogPayload(error) });
+        break;
+      case "awaiting_signature":
+        setPaymentMessage(walletProvider === "xrplconnect" ? "Confirm the installment in your XRPL wallet..." : "Signing and submitting the installment from the connected wallet...");
+        addHistoryItem(setHistory, {
+          status: "waiting",
+          title: record?.source === "manual" ? "Manual payment awaiting signature" : record?.source === "auto_start" ? "Auto-start payment awaiting signature" : "Scheduled payment awaiting signature",
+          detail: `${name} - ${planNow ? money(getSchedule(planNow).perPayment, 4) : "?"} - source tag ${SOURCE_TAG} - awaiting signature`,
+        });
+        logEvent("payment.awaiting_signature", { planId: record?.planId, attemptId: record?.id, source: record?.source });
+        break;
+      case "submitted":
+        setPaymentMessage(`Submitted — confirming on ledger ${record?.hash ? `${record.hash.slice(0, 10)}…` : "…"}`);
+        addHistoryItem(setHistory, { status: "waiting", title: "Payment submitted — confirming on ledger", detail: `${name} - ${record?.hash ?? "no hash"}` });
+        logEvent("payment.submitted", { planId: record?.planId, attemptId: record?.id, hash: record?.hash ?? null });
+        break;
+      case "unresolved":
+        setPaymentMessage("Unresolved — reconciling before any retry.");
+        addHistoryItem(setHistory, { status: "waiting", title: "Payment unresolved", detail: `${name} - ${reason ? `${reason} - ` : ""}${record?.hash ?? "no hash"} - reconciling before any retry` });
+        logEvent("payment.unresolved", { planId: record?.planId, attemptId: record?.id, hash: record?.hash ?? null, reason: reason ?? null });
+        break;
+      case "expired_to_unresolved":
+        setPaymentMessage("Unresolved — reconciling before any retry.");
+        addHistoryItem(setHistory, { status: "waiting", title: "Payment unresolved", detail: `${name} - stale attempt from a previous session expired to unresolved - reconciling before any retry` });
+        logEvent("payment.attempt.expired", { planId: record?.planId, attemptId: record?.id });
+        break;
+      case "validated_success": {
+        const nextPaidCount = Number(record?.sequence || 0) + 1;
+        const complete = planNow ? nextPaidCount >= getSchedule(planNow).payments : false;
+        setPeople((current) => current.map((item) =>
+          item.id === record?.planId
+            ? applyValidatedSuccess(item, { sequence: record.sequence, payments: getSchedule(item).payments, frequencyMs: getFrequencyMs(item), now: Date.now() })
+            : item
+        ));
+        setPaymentMessage(complete ? `Validated: tesSUCCESS — final installment paid for ${name}. Plan complete.` : `Validated: tesSUCCESS — installment ${nextPaidCount} of ${planNow ? getSchedule(planNow).payments : "?"} paid for ${name}.`);
+        addHistoryItem(setHistory, { status: "success", title: complete ? "Final payment validated" : "Payment validated", detail: `${name} - ${record?.hash ?? "no hash"} - tesSUCCESS` });
+        logEvent("payment.validated", { planId: record?.planId, attemptId: record?.id, sequence: record?.sequence, hash: record?.hash ?? null, ledgerResult: record?.ledgerResult ?? "tesSUCCESS", nextPaidCount, complete });
+        break;
+      }
+      case "validated_failure":
+        setPeople((current) => current.map((item) =>
+          item.id === record?.planId ? applyValidatedFailureRetry(item, { now: Date.now() }) : item
+        ));
+        setPaymentMessage(`Failed: ${reason ?? errorClass ?? "payment failed"} — the installment was not paid.`);
+        addHistoryItem(setHistory, { status: "failed", title: "Payment failed", detail: `${name} - ${reason ?? errorClass ?? "unknown reason"}` });
+        logEvent("payment.failed", { planId: record?.planId, attemptId: record?.id, ledgerResult: record?.ledgerResult ?? null, errorClass: errorClass ?? record?.errorClass ?? null, reason: reason ?? null });
+        break;
+      case "anomaly":
+        addHistoryItem(setHistory, { status: "waiting", title: "Payment unresolved", detail: `${name} - ledger transaction does not match this attempt - reconciling before any retry` });
+        logEvent("payment.reconcile.anomaly", { planId: record?.planId, attemptId: record?.id, hash: record?.hash ?? null, anomaly: anomaly ?? "identity_mismatch" });
+        break;
+      case "reconcile_failed":
+        logEvent("payment.reconcile.failed", { planId: record?.planId, attemptId: record?.id, reason: reason ?? null });
+        break;
+      default:
+        logEvent("payment.event.unknown", { type });
+    }
   };
 
   const payInstallment = async (person, source = "manual") => {
@@ -1224,44 +1337,9 @@ export default function CadenceDashboard() {
     }
     if (decision.action !== "proceed") return; // plan_complete is handled above
 
-    // Outcome-machine integration: open the durable attempt for this installment
-    // (sequence = paidCount at dispatch) before anything is built or prompted. The
-    // pre-check gives an accurate lock message; createAttempt still enforces the
-    // real one-active-attempt lock at the data layer, so a race cannot pay twice.
-    const sequence = paidCount;
-    const activeAttempt = getActiveAttempt(makeInstallmentId(person.id, sequence));
-    if (activeAttempt) {
-      logEvent("payment.blocked.attempt_active", { personId: person.id, name: person.name, sequence, attemptId: activeAttempt.id, attemptState: activeAttempt.state });
-      if (source === "manual") {
-        setPaymentMessage(`${person.name}'s installment is already in flight — wait for the active attempt to resolve before retrying.`);
-        addHistoryItem(setHistory, { status: "waiting", title: "Installment locked", detail: `${person.name} - installment ${person.id}:${sequence} already has an active attempt (${activeAttempt.state}).` });
-      }
-      return;
-    }
-    let attempt;
-    try {
-      attempt = updateAttempt(createAttempt({
-        planId: person.id,
-        sequence,
-        source,
-        payer: walletAddress,
-        destination: person.address,
-        amount: schedule.perPayment,
-        currency: "RLUSD",
-        issuer: RLUSD_ISSUER,
-        sourceTag: SOURCE_TAG,
-      }).id, "awaiting_signature");
-    } catch (storeError) {
-      // Fail closed: an installment is never paid without a durable attempt
-      // record — an untracked payment is how double-pays happen.
-      logEvent("payment.attempt.store_failed", { personId: person.id, name: person.name, sequence, error: safeLogPayload(storeError) });
-      setPaymentMessage("Cadence could not record the installment attempt before paying, so the payment was blocked. Try again.");
-      addHistoryItem(setHistory, { status: "failed", title: "Attempt not recorded", detail: `${person.name} - installment ${person.id}:${sequence} was blocked before any transaction was built.` });
-      return;
-    }
-
-    setPaymentMessage(walletProvider === "xrplconnect" ? "Confirm the installment in your XRPL wallet..." : "Signing and submitting the installment from the connected wallet...");
-    addHistoryItem(setHistory, { status: "waiting", title: source === "manual" ? "Manual payment started" : "Scheduled payment started", detail: `${person.name} - ${money(schedule.perPayment, 4)} - source tag ${SOURCE_TAG}` });
+    // The durable attempt (lock, pre-submit persistence, fail-closed store
+    // handling) is owned by the guarded dispatch below — the single flow every
+    // entry point shares. The dashboard never creates attempt records itself.
     logEvent("payment.local_signing.started", {
       transactionType: "Payment",
       account: shortAddress(walletAddress),
@@ -1271,77 +1349,68 @@ export default function CadenceDashboard() {
       issuer: RLUSD_ISSUER,
     });
     try {
-      const submitter = walletProvider === "xrplconnect" ? submitXrplConnectRlusdPayment : submitRlusdPayment;
-      const { result, hash } = await submitter(walletProvider === "xrplconnect" ? {
-        manager: xrplConnectManagerRef.current,
-        account: walletAddress,
-        destination: person.address,
-        amount: tokenAmount(schedule.perPayment),
-      } : {
-        wallet: signingWallet,
-        destination: person.address,
-        amount: tokenAmount(schedule.perPayment),
-      });
-      const tx = result?.result || result || {};
-      const txHash = hash || tx.hash;
-      // Record the observed outcome on the durable attempt through the canonical
-      // submit-outcome normalizer (PR 15): a readable ledger verdict classifies
-      // immediately, a hash without a verdict holds at submitted for hash
-      // reconciliation, and neither proves nothing — unresolved, never success.
-      // Bookkeeping failure is logged, never allowed to mask the payment result.
-      try {
-        const outcome = normalizeSubmitOutcome({ result, hash });
-        const hashPatch = outcome.hash ? { hash: outcome.hash } : {};
-        if (outcome.ledgerResult === "tesSUCCESS") {
-          updateAttempt(attempt.id, "submitted", hashPatch);
-          updateAttempt(attempt.id, "validated_success", { ledgerResult: outcome.ledgerResult });
-        } else if (outcome.ledgerResult && /^te[cflm]/.test(outcome.ledgerResult)) {
-          updateAttempt(attempt.id, "submitted", hashPatch);
-          updateAttempt(attempt.id, "validated_failure", { ledgerResult: outcome.ledgerResult });
-        } else if (outcome.hash) {
-          updateAttempt(attempt.id, "submitted", hashPatch);
-        } else {
-          updateAttempt(attempt.id, "unresolved");
-        }
-      } catch (storeError) {
-        logEvent("payment.attempt.record_failed", { attemptId: attempt.id, error: safeLogPayload(storeError) });
-      }
-      const nextPaidCount = paidCount + 1;
-      const complete = nextPaidCount >= schedule.payments;
-      setPeople((current) => current.map((item) => item.id === person.id ? {
-        ...item,
-        paidCount: nextPaidCount,
-        active: complete ? false : item.active,
-        nextRunAt: complete ? null : Date.now() + getFrequencyMs(item),
-      } : item));
-      setPaymentMessage(txHash ? `Payment submitted: ${txHash.slice(0, 10)}...` : "Payment submitted.");
-      addHistoryItem(setHistory, { status: "success", title: complete ? "Final payment submitted" : "Payment submitted", detail: txHash ? `${person.name} - ${money(schedule.perPayment, 4)} - tag ${SOURCE_TAG} - ${txHash}` : `${person.name} - ${money(schedule.perPayment, 4)} - tag ${SOURCE_TAG}` });
-      logEvent("payment.submitted", {
-        personId: person.id,
-        name: person.name,
-        hash: txHash || null,
-        nextPaidCount,
-        complete,
-        nextRunAt: complete ? null : Date.now() + getFrequencyMs(person),
-      });
+      await paymentDispatch.dispatch(
+        person,
+        {
+          source,
+          label: person.name,
+          payer: walletProvider === "xrplconnect" ? walletAddress : signingWallet?.address || walletAddress,
+          destination: person.address,
+          amount: tokenAmount(schedule.perPayment),
+          currency: RLUSD_CURRENCY,
+          issuer: RLUSD_ISSUER,
+          sourceTag: SOURCE_TAG,
+          submit: () =>
+            walletProvider === "xrplconnect"
+              ? submitXrplConnectRlusdPayment({
+                  manager: xrplConnectManagerRef.current,
+                  account: walletAddress,
+                  destination: person.address,
+                  amount: tokenAmount(schedule.perPayment),
+                })
+              : submitRlusdPayment({
+                  wallet: signingWallet,
+                  destination: person.address,
+                  amount: tokenAmount(schedule.perPayment),
+                }),
+        },
+        handlePaymentEvent,
+      );
     } catch (error) {
-      try {
-        // No hash reached the caller: per the machine's transition table a
-        // pre-submission failure is validated_failure — terminal but retry-safe,
-        // so the installment may number a fresh attempt on the next dispatch.
-        updateAttempt(attempt.id, "validated_failure", { errorClass: /reject|cancel/i.test(error?.message || "") ? "sign_rejected" : "network" });
-      } catch (storeError) {
-        logEvent("payment.attempt.record_failed", { attemptId: attempt.id, error: safeLogPayload(storeError) });
-      }
-      setPaymentMessage(error?.message || "Payment was not submitted.");
-      setPeople((current) => current.map((item) => item.id === person.id ? { ...item, nextRunAt: Date.now() + 60000 } : item));
-      addHistoryItem(setHistory, { status: "failed", title: "Payment not submitted", detail: `${person.name} - ${error?.message || "Wallet confirmation was cancelled."}` });
-      logEvent("payment.failed", { personId: person.id, name: person.name, source, error, retryAt: Date.now() + 60000 });
+      // Any error escaping the dispatch is a defect or an environment failure
+      // BEFORE any submit attempt — never an outcome. Surface loudly; the
+      // count is untouched. Pre-submit store failures reach the operator
+      // through the dispatch's own store_failed event instead.
+      setPaymentMessage("Could not start the payment — see the debug log.");
+      addHistoryItem(setHistory, { status: "failed", title: "Payment not started", detail: `${person.name} - ${error?.message || "unknown error"}` });
+      logEvent("payment.dispatch.failed", { personId: person.id, name: person.name, source, error });
     }
   };
 
+  // Reconciliation cadence (spec "What we build" 6): expire stale no-hash
+  // active records to unresolved (never to failure) and reconcile hashed
+  // unresolved attempts — once on mount, so a payment that landed while the
+  // app was closed still settles on next launch, and on every scheduler tick.
+  // The busy ref serializes passes so ticks never overlap mid-lookup.
+  const reconcilingRef = useRef(false);
+  const runReconciliation = () => {
+    if (reconcilingRef.current) return;
+    reconcilingRef.current = true;
+    paymentDispatch
+      .runReconciliationPass(handlePaymentEvent)
+      .catch((error) => logEvent("payment.reconcile.pass_failed", { error: String(error) }))
+      .finally(() => {
+        reconcilingRef.current = false;
+      });
+  };
+
+  useEffect(() => {
+    runReconciliation();
+  }, []);
+
   useEffect(() => {
     const timer = window.setInterval(() => {
+      runReconciliation();
       const duePerson = people.find((person) =>
         person.active &&
         person.nextRunAt &&

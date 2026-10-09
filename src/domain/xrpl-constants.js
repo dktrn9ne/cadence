@@ -2,3 +2,4 @@ export const RLUSD_CURRENCY = "524C555344000000000000000000000000000000";
 export const RLUSD_ISSUER = "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De";
 export const CADENCE_EMPLOYER_WALLET = "rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864";
 export const SOURCE_TAG = 2606250005;
+export const XRPL_WS_URL = "wss://s1.ripple.com";
