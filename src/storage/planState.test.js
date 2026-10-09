@@ -20,6 +20,14 @@ const basePlan = {
   paidCount: 2,
   nextRunAt: 1760003600000,
   active: true,
+  name: "Riley",
+  role: "Designer",
+  email: "riley@example.com",
+  payMode: "weekly",
+  weeklyPay: "16",
+  hourlyPay: "0",
+  hoursPerWeek: "0",
+  frequency: "day",
   attempts: {},
 };
 
@@ -30,8 +38,36 @@ const allowlistedPlan = {
   paidCount: 2,
   nextRunAt: 1760003600000,
   active: true,
+  name: "Riley",
+  role: "Designer",
+  email: "riley@example.com",
+  payMode: "weekly",
+  weeklyPay: "16",
+  hourlyPay: "0",
+  hoursPerWeek: "0",
+  frequency: "day",
   attempts: {},
 };
+
+// The persisted key order the allowlist emits — pinned so an accidental
+// reshuffle of the closed shape surfaces in review instead of in production.
+const PERSISTED_PLAN_KEYS = [
+  "id",
+  "payer",
+  "destination",
+  "paidCount",
+  "nextRunAt",
+  "active",
+  "name",
+  "role",
+  "email",
+  "payMode",
+  "weeklyPay",
+  "hourlyPay",
+  "hoursPerWeek",
+  "frequency",
+  "attempts",
+];
 
 const readStored = () => JSON.parse(window.localStorage.getItem(STORAGE_KEY));
 
@@ -150,6 +186,14 @@ describe("planState malformed or unknown storage", () => {
         paidCount: 0,
         nextRunAt: null,
         active: false,
+        name: "",
+        role: "",
+        email: "",
+        payMode: "",
+        weeklyPay: "",
+        hourlyPay: "",
+        hoursPerWeek: "",
+        frequency: "",
         attempts: {},
       },
     ]);
@@ -171,19 +215,27 @@ describe("planState secret-material pollution", () => {
     flushPlans();
 
     const stored = readStored();
-    expect(Object.keys(stored.plans[0])).toEqual([
-      "id",
-      "payer",
-      "destination",
-      "paidCount",
-      "nextRunAt",
-      "active",
-      "attempts",
-    ]);
+    expect(Object.keys(stored.plans[0])).toEqual(PERSISTED_PLAN_KEYS);
     const raw = window.localStorage.getItem(STORAGE_KEY);
     for (const secret of ["sEdSuperSecretSeedMaterial", "0xdeadbeef", "SHABeefCafe", "hunter2", "7C0A9E01"]) {
       expect(raw).not.toContain(secret);
     }
+  });
+
+  it("never persists session-only recovery fields (catch-up approval is re-derived at mount)", () => {
+    const sessionMarked = {
+      ...basePlan,
+      catchUpPending: true,
+      missedCount: 3,
+      recovered: true,
+    };
+    savePlans([sessionMarked]);
+    flushPlans();
+    const stored = readStored().plans[0];
+    expect(Object.keys(stored)).toEqual(PERSISTED_PLAN_KEYS);
+    expect(stored.catchUpPending).toBeUndefined();
+    expect(stored.missedCount).toBeUndefined();
+    expect(stored.recovered).toBeUndefined();
   });
 
   it("never persists attempt fields outside the allowlist", () => {
@@ -407,15 +459,7 @@ describe("ported from attemptStore: secret-shaped keys and amount typing", () =>
       expect(Object.keys(stored)).not.toContain(key);
       expect(raw).not.toContain(FAKE_VALUE(key));
     }
-    expect(Object.keys(stored)).toEqual([
-      "id",
-      "payer",
-      "destination",
-      "paidCount",
-      "nextRunAt",
-      "active",
-      "attempts",
-    ]);
+    expect(Object.keys(stored)).toEqual(PERSISTED_PLAN_KEYS);
   });
 
   it("persists amounts as strings only — hostile amounts never land as JSON numbers, and the attempt survives", () => {

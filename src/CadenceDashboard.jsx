@@ -4,8 +4,11 @@ import { theme } from "./brand/tokens.js";
 import { CadenceLockup, CadenceMark } from "./brand/CadenceMark.jsx";
 import { RLUSD_CURRENCY, RLUSD_ISSUER, SOURCE_TAG } from "./domain/xrpl-constants.js";
 import { TIME_UNITS, FREQUENCIES, getSchedule, getFrequencyMs } from "./domain/schedule.js";
-import { installmentId as makeInstallmentId } from "./domain/paymentOutcome.js";
-import { normalizeSubmitOutcome } from "./services/normalizeOutcome.js";
+import { createInstallmentDispatcher } from "./services/installmentDispatcher.js";
+import { flushPlans, loadPlans, savePlans } from "./storage/planState.js";
+import { dispatchBlockReason, installmentId } from "./domain/installment.js";
+import { countMissedWindows, hydrateRestoredPlans, mountAttemptAction } from "./domain/recovery.js";
+import { OUTCOMES, lookupTransaction } from "./services/xrplLedger.js";
 import {
   buildIncomeProofCsv,
   buildIncomeProofStats,
@@ -16,7 +19,6 @@ import {
   selectIncomeRows,
   stampPlanPayer,
 } from "./domain/incomeProof";
-import { createAttempt, getActiveAttempt, updateAttempt } from "./storage/attemptStore.js";
 import { getXrplConnect } from "./services/wallet-connection.js";
 import { submitRlusdPayment, submitXrplConnectRlusdPayment } from "./services/payments.js";
 
@@ -294,6 +296,13 @@ const loadStoredLogs = () => {
   }
 };
 
+// Durable due-state, restored before first paint (PR 04): loadPlans parses the
+// versioned envelope with safe defaults, and hydrateRestoredPlans maps it onto
+// the dashboard's plan shape (destination -> address, neutral schedule
+// defaults, recovered banner flag). A pure read — safe under StrictMode's
+// double-invoked initializer.
+const restorePlans = () => hydrateRestoredPlans(loadPlans());
+
 function BrandPattern({ variant = "wave" }) {
   if (variant === "dots") return <div className="brand-pattern pattern-dots" aria-hidden="true" />;
   if (variant === "rings") return <div className="brand-pattern pattern-rings" aria-hidden="true" />;
@@ -547,19 +556,47 @@ function PeopleList({ people, selectedId, onSelect, onAdd }) {
   );
 }
 
-function PersonDetails({ person, onEdit, onToggle, onPay, walletReady, paymentMessage }) {
+function PersonDetails({ person, onEdit, onToggle, onPay, onApproveMissed, onSkipMissed, onReconcileNow, walletReady, paymentMessage }) {
   const schedule = getSchedule(person);
   const paidCount = Number(person.paidCount || 0);
   const nextRun = person.nextRunAt ? new Date(person.nextRunAt).toLocaleString() : "Not scheduled";
+  // Recovery states (PR 04): the next installment's durable attempt decides
+  // what the card surfaces. A verifying (unresolved) submission takes
+  // precedence over the missed-window prompt — both block dispatch; the
+  // recovered banner only shows when neither is pending.
+  const nextAttempt = person.attempts?.[installmentId(person.id, paidCount)];
+  const verifying = nextAttempt?.status === "unresolved";
+  const verifyingHash = verifying && nextAttempt.hash ? `${String(nextAttempt.hash).slice(0, 10)}...` : null;
+  const missedCount = Number(person.missedCount || 0);
+  const missedPending = person.catchUpPending === true && missedCount > 0 && !verifying;
+  const lastFailed = nextAttempt?.status === "validated_failure";
   return (
     <div className="details-card">
       <div className="details-top"><div className="large-avatar">{person.name.slice(0, 1).toUpperCase()}</div><div><p className="eyebrow">Selected person</p><h2>{person.name}</h2><p className="muted-line">{person.role || "No role added"} {person.email ? ` ${person.email}` : ""}</p></div><button className="text-button edit-button" onClick={onEdit}>Edit</button></div>
       <div className="address-line"><span>Destination</span><code>{shortAddress(person.address)}</code></div>
       <div className="detail-highlight"><div><span className="eyebrow">Weekly pay</span><strong>{money(schedule.weeklyPay)}</strong><small>recipient amount across 1 week</small></div><div className="highlight-arrow">{">"}</div><div><span className="eyebrow">Each payout</span><strong>{money(schedule.perPayment, 6)}</strong><small>sent directly to the destination wallet</small></div></div>
       <div className="plan-meter"><div><span>Installments sent</span><strong>{paidCount} / {schedule.payments.toLocaleString()}</strong></div><div><span>Next send</span><strong>{nextRun}</strong></div><div><span>Recipient debit</span><strong>{money(schedule.totalPerPayment, 6)}</strong></div><div><span>Source tag</span><strong>{SOURCE_TAG}</strong></div><div><span>Payer</span><strong>{person.payer ? shortAddress(person.payer) : "Not attached"}</strong></div></div>
-      <div className="details-actions"><Button kind={person.active ? "secondary" : "primary"} onClick={onToggle}>{person.active ? "Pause plan" : "Start plan"}</Button><Button kind="secondary" onClick={onPay} disabled={!walletReady || !person.address.startsWith("r")}>Pay one installment</Button></div>
+      {verifying && (
+        <div className="recovery-note recovery-verifying" role="status">
+          <b>Verifying installment #{paidCount + 1} with the ledger…</b>
+          <span>{verifyingHash ? `Submitted as ${verifyingHash} before the app closed — outcome not yet known.` : "An earlier submission has no reconcilable hash yet."}</span>
+        </div>
+      )}
+      {missedPending && (
+        <div className="recovery-note recovery-missed" role="status">
+          <b>{missedCount === 1 ? "1 installment missed while the app was closed" : `${missedCount} installments missed while the app was closed`}</b>
+          <span>Approve to send installment #{paidCount + 1} through the normal wallet flow — one installment per approval.</span>
+          <div className="details-actions"><Button onClick={() => onApproveMissed(person)}>Approve send</Button><Button kind="secondary" onClick={() => onSkipMissed(person)}>Skip this window</Button></div>
+        </div>
+      )}
+      {person.recovered === true && !verifying && !missedPending && (
+        <div className="recovery-note" role="status">Recovered from last session — up to date</div>
+      )}
+      <div className="details-actions"><Button kind={person.active ? "secondary" : "primary"} onClick={onToggle}>{person.active ? "Pause plan" : "Start plan"}</Button><Button kind="secondary" onClick={onPay} disabled={!walletReady || !person.address.startsWith("r") || verifying}>Pay one installment</Button>{verifying && <Button kind="secondary" onClick={() => onReconcileNow(person)}>Reconcile now</Button>}</div>
       {!walletReady && <p className="inline-note">Connect a wallet first to make an on-chain payment.</p>}
       {walletReady && !person.address.startsWith("r") && <p className="inline-note">Add a public XRPL destination address before paying.</p>}
+      {verifying && <p className="inline-note">Paying is blocked until the ledger classifies the earlier submission — reconcile to unblock.</p>}
+      {lastFailed && <p className="inline-note">The last attempt for installment #{paidCount + 1} failed and did not advance this plan — see payment activity below; retrying is a fresh decision.</p>}
       {paymentMessage && <div className="success-message">{paymentMessage}</div>}
       <div className="safe-payment-note"><span>?</span> Cadence submits one RLUSD payment per interval to the designated destination wallet. Scheduled plans continue until all weekly installments have been sent or you pause the plan.</div>
     </div>
@@ -870,7 +907,7 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
   );
 }
 
-function Dashboard({ walletAddress, walletProvider, rlusdBalance, balanceLoading, onRefreshBalance, onOpenFunding, onReset, people, onAdd, selectedId, onSelect, onSave, onEdit, onToggle, onPay, paymentMessage, history, onExportLogs, onOpenEmployee }) {
+function Dashboard({ walletAddress, walletProvider, rlusdBalance, balanceLoading, onRefreshBalance, onOpenFunding, onReset, people, onAdd, selectedId, onSelect, onSave, onEdit, onToggle, onPay, onApproveMissed, onSkipMissed, onReconcileNow, paymentMessage, history, onExportLogs, onOpenEmployee }) {
   const selectedPerson = people.find((person) => person.id === selectedId);
   const walletReady = Boolean((walletProvider === "xrplconnect" || walletProvider === "local") && walletAddress?.startsWith("r"));
   const providerLabel = walletProvider === "xrplconnect" ? "XRPL wallet" : "Local wallet";
@@ -901,7 +938,7 @@ function Dashboard({ walletAddress, walletProvider, rlusdBalance, balanceLoading
           secondaryAction={rlusdBalance <= 0 ? <Button kind="soft" onClick={onOpenFunding}>Add RLUSD</Button> : null}
         />
         <section className="payer-strip"><div><p className="eyebrow">Payment wallet</p><strong>{shortAddress(walletAddress)}</strong><span>{payerCopy}</span></div><Button kind="secondary" onClick={onReset}>Change wallet</Button></section>
-        <div className="content-grid"><PeopleList people={people} selectedId={selectedId} onSelect={onSelect} onAdd={onAdd} />{selectedPerson ? <PersonDetails person={selectedPerson} onEdit={() => onEdit(selectedPerson)} onToggle={() => onToggle(selectedPerson.id)} onPay={() => onPay(selectedPerson)} walletReady={walletReady} paymentMessage={paymentMessage} /> : <div className="details-card details-empty"><div className="empty-sun">*</div><h2>Add a recipient to begin.</h2><p>Create a payment plan with a verified XRPL destination address before sending RLUSD.</p><Button onClick={onAdd}>Create payment plan</Button></div>}</div>
+        <div className="content-grid"><PeopleList people={people} selectedId={selectedId} onSelect={onSelect} onAdd={onAdd} />{selectedPerson ? <PersonDetails person={selectedPerson} onEdit={() => onEdit(selectedPerson)} onToggle={() => onToggle(selectedPerson.id)} onPay={() => onPay(selectedPerson)} onApproveMissed={onApproveMissed} onSkipMissed={onSkipMissed} onReconcileNow={onReconcileNow} walletReady={walletReady} paymentMessage={paymentMessage} /> : <div className="details-card details-empty"><div className="empty-sun">*</div><h2>Add a recipient to begin.</h2><p>Create a payment plan with a verified XRPL destination address before sending RLUSD.</p><Button onClick={onAdd}>Create payment plan</Button></div>}</div>
         <section className="history-panel"><div className="card-heading"><div><p className="eyebrow">Payment activity</p><h2>Recent actions</h2></div><Button kind="small" onClick={onExportLogs}>Download support file</Button></div>{history.length === 0 ? <p className="muted-line">No payment activity yet.</p> : <div className="history-list">{history.slice(0, 8).map((item) => <div className={`history-row ${item.status}`} key={item.id}><div><b>{item.title}</b><span>{item.detail}</span></div><time>{new Date(item.at).toLocaleString()}</time></div>)}</div>}</section>
         <p className="footer-note">RLUSD is a dollar-denominated token on the XRP Ledger. Network fees, issuer details, and wallet confirmations should always be checked before sending.</p>
       </main>
@@ -921,7 +958,7 @@ export default function CadenceDashboard() {
   const [showFunding, setShowFunding] = useState(false);
   const [signingWallet, setSigningWallet] = useState(null);
   const [walletProvider, setWalletProvider] = useState("");
-  const [people, setPeople] = useState([]);
+  const [people, setPeople] = useState(restorePlans);
   const [selectedId, setSelectedId] = useState(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingPerson, setEditingPerson] = useState(null);
@@ -929,11 +966,46 @@ export default function CadenceDashboard() {
   const [history, setHistory] = useState([]);
   const [debugLogs, setDebugLogs] = useState(loadStoredLogs);
   const [dashboardView, setDashboardView] = useState("employer");
-  const autoPayingRef = useRef(false);
+  // Single-writer state mirror: every plan mutation flows through the ref so
+  // async dispatch continuations always read fresh due-state (the `people`
+  // state alone goes stale between a commit and a later continuation).
+  // Initialized from the restored state so recovery and dispatch read what
+  // was persisted, not an empty array.
+  const peopleRef = useRef(null);
+  if (peopleRef.current === null) peopleRef.current = people;
+  const startTimerRef = useRef(null);
   const xrplConnectorRef = useRef(null);
   const xrplConnectManagerRef = useRef(null);
   const [xrplConnectManager, setXrplConnectManager] = useState(null);
   const localDesktop = useMemo(() => isLocalDesktopApp(), []);
+
+  const commitPlans = (next) => {
+    peopleRef.current = next;
+    setPeople(next);
+  };
+  const updatePeople = (updater) => commitPlans(updater(peopleRef.current));
+  const clearStartTimer = () => {
+    if (startTimerRef.current !== null) {
+      window.clearTimeout(startTimerRef.current);
+      startTimerRef.current = null;
+    }
+  };
+
+  // Durable due-state: every plans change is persisted (debounced); attempt
+  // records persist immediately via recordAttempt inside the dispatcher, so a
+  // submitted hash survives the reload it exists to be reconciled after.
+  useEffect(() => {
+    savePlans(peopleRef.current);
+  }, [people]);
+  useEffect(() => {
+    const flush = () => flushPlans();
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      flushPlans();
+      clearStartTimer();
+    };
+  }, []);
 
   const selectedPerson = useMemo(() => people.find((person) => person.id === selectedId), [people, selectedId]);
 
@@ -1116,7 +1188,7 @@ export default function CadenceDashboard() {
   const savePerson = (draft) => {
     const next = { ...stampPlanPayer(draft, walletAddress), payMode: draft.payMode || "weekly", weeklyPay: draft.weeklyPay ?? draft.amount ?? "16", hourlyPay: draft.hourlyPay ?? "20", hoursPerWeek: draft.hoursPerWeek ?? "40", id: draft.id || `person-${Date.now()}`, paidCount: draft.paidCount || 0, nextRunAt: draft.nextRunAt || null };
     const schedule = getSchedule(next);
-    setPeople((current) => draft.id ? current.map((person) => person.id === draft.id ? next : person) : [...current, next]);
+    updatePeople((current) => draft.id ? current.map((person) => person.id === draft.id ? next : person) : [...current, next]);
     setSelectedId(next.id);
     setEditorOpen(false);
     setEditingPerson(null);
@@ -1140,7 +1212,10 @@ export default function CadenceDashboard() {
     if (!person) return;
 
     if (person.active) {
-      setPeople((current) => current.map((item) => item.id === id ? { ...item, active: false, nextRunAt: null } : item));
+      // Pausing cancels a queued start-plan payment — a pause must stop new
+      // dispatches, including one waiting in the start-timer window.
+      clearStartTimer();
+      updatePeople((current) => current.map((item) => item.id === id ? { ...item, active: false, nextRunAt: null } : item));
       setPaymentMessage(`${person.name}'s plan is paused.`);
       addHistoryItem(setHistory, { status: "paused", title: "Plan paused", detail: person.name });
       logEvent("plan.paused", { id: person.id, name: person.name });
@@ -1151,7 +1226,7 @@ export default function CadenceDashboard() {
     if (payerMismatch) {
       // Starting a payer-bound plan from a different wallet is blocked before any
       // transaction is queued — fresh authorization from the stored payer is required.
-      setPeople((current) => current.map((item) => item.id === id ? { ...item, active: false, nextRunAt: null } : item));
+      updatePeople((current) => current.map((item) => item.id === id ? { ...item, active: false, nextRunAt: null } : item));
       setPaymentMessage(`${person.name}'s plan is authorized for payer ${shortAddress(payerMismatch.expectedPayer)}, but a different wallet is connected. Reconnect the payer wallet to resume — fresh authorization is required.`);
       addHistoryItem(setHistory, { status: "paused", title: "Payer mismatch", detail: `${person.name} - expected ${shortAddress(payerMismatch.expectedPayer)}, connected ${payerMismatch.connectedPayer ? shortAddress(payerMismatch.connectedPayer) : "none"}` });
       logEvent("payment.blocked.payer_mismatch", { personId: person.id, name: person.name, expected: shortAddress(payerMismatch.expectedPayer), connected: payerMismatch.connectedPayer ? shortAddress(payerMismatch.connectedPayer) : "none", source: "plan_start" });
@@ -1159,7 +1234,7 @@ export default function CadenceDashboard() {
     }
 
     const ready = Boolean((walletProvider === "xrplconnect" || signingWallet) && person.address?.startsWith("r"));
-    setPeople((current) => current.map((item) => item.id === id ? { ...item, active: true, nextRunAt: ready ? Date.now() : null } : item));
+    updatePeople((current) => current.map((item) => item.id === id ? { ...item, active: true, nextRunAt: ready ? Date.now() : null } : item));
     setPaymentMessage(ready ? `${person.name}'s plan started. First payment prompt is opening.` : `${person.name}'s plan started. Connect a wallet and add a destination address to send payments.`);
     addHistoryItem(setHistory, { status: ready ? "success" : "waiting", title: "Plan started", detail: ready ? `${person.name} - first payment queued now` : `${person.name} - waiting for payer wallet and destination` });
     logEvent("plan.started", {
@@ -1170,202 +1245,409 @@ export default function CadenceDashboard() {
       hasDestination: Boolean(person.address?.startsWith("r")),
       schedule: getSchedule(person),
     });
-    if (ready) window.setTimeout(() => payInstallment({ ...person, active: true, nextRunAt: Date.now() }, "scheduled"), 150);
+    if (ready) {
+      // The start-plan payment is a user-initiated action: it is dispatched as
+      // `source: "manual"` through the same guarded door as the button, from a
+      // stored, cancellable timer — pausing, resetting the wallet, or unmount
+      // cancels it (never an un-cancellable bare timeout).
+      startTimerRef.current = window.setTimeout(() => {
+        startTimerRef.current = null;
+        void payInstallment({ ...person, active: true, nextRunAt: Date.now() }, "manual");
+      }, 150);
+    }
   };
 
-  const payInstallment = async (person, source = "manual") => {
-    const schedule = getSchedule(person);
-    const paidCount = Number(person.paidCount || 0);
-    logEvent("payment.installment.requested", {
-      source,
-      personId: person.id,
-      name: person.name,
-      paidCount,
-      plannedPayments: schedule.payments,
-      perPayment: schedule.perPayment,
-      sourceTag: SOURCE_TAG,
-      payer: walletAddress ? shortAddress(walletAddress) : "none",
-      destination: person.address ? shortAddress(person.address) : "none",
-    });
-
-    if (paidCount >= schedule.payments) {
-      setPeople((current) => current.map((item) => item.id === person.id ? { ...item, active: false, nextRunAt: null } : item));
-      addHistoryItem(setHistory, { status: "success", title: "Plan complete", detail: `${person.name} has received all planned installments.` });
-      logEvent("payment.installment.skipped", { reason: "plan_complete", personId: person.id, name: person.name });
-      return;
-    }
-
-    // Payer guard (payment-safety rule): decide everything BEFORE any attempt
-    // record or transaction exists — a payer-bound plan must never be paid from
-    // another wallet, and a mismatch never leaves an attempt behind.
-    const decision = planInstallmentAction(person, {
-      connectedWallet: walletAddress,
-      hasSigningWallet: Boolean(walletProvider === "xrplconnect" || signingWallet),
-      paidCount,
-      plannedPayments: schedule.payments,
-    });
-
-    if (decision.action === "payer_mismatch") {
-      setPeople((current) => current.map((item) => item.id === person.id ? { ...item, active: false, nextRunAt: null } : item));
-      setPaymentMessage(`${person.name}'s plan is authorized for payer ${shortAddress(decision.expectedPayer)}, but a different wallet is connected. Reconnect the payer wallet to resume — fresh authorization is required.`);
-      addHistoryItem(setHistory, { status: "paused", title: "Payer mismatch", detail: `${person.name} - expected ${shortAddress(decision.expectedPayer)}, connected ${decision.connectedPayer ? shortAddress(decision.connectedPayer) : "none"}` });
-      logEvent("payment.blocked.payer_mismatch", { personId: person.id, name: person.name, expected: shortAddress(decision.expectedPayer), connected: decision.connectedPayer ? shortAddress(decision.connectedPayer) : "none", source });
-      return;
-    }
-    if (decision.action === "missing_wallet_or_destination") {
-      setPaymentMessage(`${person.name} needs a connected wallet and destination address.`);
-      addHistoryItem(setHistory, { status: "waiting", title: "Payment waiting", detail: `${person.name} needs a connected wallet and destination address.` });
-      logEvent("payment.installment.blocked", {
-        reason: "missing_wallet_or_destination",
-        hasSigningWallet: Boolean(walletProvider === "xrplconnect" || signingWallet),
-        hasDestination: Boolean(person.address?.startsWith("r")),
-      });
-      return;
-    }
-    if (decision.action !== "proceed") return; // plan_complete is handled above
-
-    // Outcome-machine integration: open the durable attempt for this installment
-    // (sequence = paidCount at dispatch) before anything is built or prompted. The
-    // pre-check gives an accurate lock message; createAttempt still enforces the
-    // real one-active-attempt lock at the data layer, so a race cannot pay twice.
-    const sequence = paidCount;
-    const activeAttempt = getActiveAttempt(makeInstallmentId(person.id, sequence));
-    if (activeAttempt) {
-      logEvent("payment.blocked.attempt_active", { personId: person.id, name: person.name, sequence, attemptId: activeAttempt.id, attemptState: activeAttempt.state });
-      if (source === "manual") {
-        setPaymentMessage(`${person.name}'s installment is already in flight — wait for the active attempt to resolve before retrying.`);
-        addHistoryItem(setHistory, { status: "waiting", title: "Installment locked", detail: `${person.name} - installment ${person.id}:${sequence} already has an active attempt (${activeAttempt.state}).` });
-      }
-      return;
-    }
-    let attempt;
-    try {
-      attempt = updateAttempt(createAttempt({
-        planId: person.id,
-        sequence,
-        source,
-        payer: walletAddress,
-        destination: person.address,
-        amount: schedule.perPayment,
-        currency: "RLUSD",
-        issuer: RLUSD_ISSUER,
-        sourceTag: SOURCE_TAG,
-      }).id, "awaiting_signature");
-    } catch (storeError) {
-      // Fail closed: an installment is never paid without a durable attempt
-      // record — an untracked payment is how double-pays happen.
-      logEvent("payment.attempt.store_failed", { personId: person.id, name: person.name, sequence, error: safeLogPayload(storeError) });
-      setPaymentMessage("Cadence could not record the installment attempt before paying, so the payment was blocked. Try again.");
-      addHistoryItem(setHistory, { status: "failed", title: "Attempt not recorded", detail: `${person.name} - installment ${person.id}:${sequence} was blocked before any transaction was built.` });
-      return;
-    }
-
-    setPaymentMessage(walletProvider === "xrplconnect" ? "Confirm the installment in your XRPL wallet..." : "Signing and submitting the installment from the connected wallet...");
-    addHistoryItem(setHistory, { status: "waiting", title: source === "manual" ? "Manual payment started" : "Scheduled payment started", detail: `${person.name} - ${money(schedule.perPayment, 4)} - source tag ${SOURCE_TAG}` });
-    logEvent("payment.local_signing.started", {
-      transactionType: "Payment",
-      account: shortAddress(walletAddress),
-      destination: shortAddress(person.address),
-      sourceTag: SOURCE_TAG,
-      amount: tokenAmount(schedule.perPayment),
-      issuer: RLUSD_ISSUER,
-    });
-    try {
+  // The guarded per-installment door (PR 04): one dispatcher per render,
+  // wired to the single-writer plans mirror and the existing submitter
+  // selection. Claims live in a ref, so the one-attempt-per-installment lock
+  // survives every re-render for the life of the mount.
+  const dispatchClaimsRef = useRef(new Set());
+  const { dispatchInstallment } = createInstallmentDispatcher({
+    getPlans: () => peopleRef.current,
+    setPlans: commitPlans,
+    submit: (plan, amount) => {
       const submitter = walletProvider === "xrplconnect" ? submitXrplConnectRlusdPayment : submitRlusdPayment;
-      const { result, hash } = await submitter(walletProvider === "xrplconnect" ? {
-        manager: xrplConnectManagerRef.current,
-        account: walletAddress,
-        destination: person.address,
-        amount: tokenAmount(schedule.perPayment),
-      } : {
-        wallet: signingWallet,
-        destination: person.address,
-        amount: tokenAmount(schedule.perPayment),
+      return walletProvider === "xrplconnect"
+        ? submitter({ manager: xrplConnectManagerRef.current, account: walletAddress, destination: plan.address, amount })
+        : submitter({ wallet: signingWallet, destination: plan.address, amount });
+    },
+    claims: dispatchClaimsRef.current,
+  });
+
+  const payInstallment = async (person, source = "manual") => {
+    try {
+      const schedule = getSchedule(person);
+      const paidCount = Number(person.paidCount || 0);
+      logEvent("payment.installment.requested", {
+        source,
+        personId: person.id,
+        name: person.name,
+        paidCount,
+        plannedPayments: schedule.payments,
+        perPayment: schedule.perPayment,
+        sourceTag: SOURCE_TAG,
+        payer: walletAddress ? shortAddress(walletAddress) : "none",
+        destination: person.address ? shortAddress(person.address) : "none",
       });
-      const tx = result?.result || result || {};
-      const txHash = hash || tx.hash;
-      // Record the observed outcome on the durable attempt through the canonical
-      // submit-outcome normalizer (PR 15): a readable ledger verdict classifies
-      // immediately, a hash without a verdict holds at submitted for hash
-      // reconciliation, and neither proves nothing — unresolved, never success.
-      // Bookkeeping failure is logged, never allowed to mask the payment result.
-      try {
-        const outcome = normalizeSubmitOutcome({ result, hash });
-        const hashPatch = outcome.hash ? { hash: outcome.hash } : {};
-        if (outcome.ledgerResult === "tesSUCCESS") {
-          updateAttempt(attempt.id, "submitted", hashPatch);
-          updateAttempt(attempt.id, "validated_success", { ledgerResult: outcome.ledgerResult });
-        } else if (outcome.ledgerResult && /^te[cflm]/.test(outcome.ledgerResult)) {
-          updateAttempt(attempt.id, "submitted", hashPatch);
-          updateAttempt(attempt.id, "validated_failure", { ledgerResult: outcome.ledgerResult });
-        } else if (outcome.hash) {
-          updateAttempt(attempt.id, "submitted", hashPatch);
-        } else {
-          updateAttempt(attempt.id, "unresolved");
-        }
-      } catch (storeError) {
-        logEvent("payment.attempt.record_failed", { attemptId: attempt.id, error: safeLogPayload(storeError) });
+
+      if (paidCount >= schedule.payments) {
+        updatePeople((current) => current.map((item) => item.id === person.id ? { ...item, active: false, nextRunAt: null } : item));
+        addHistoryItem(setHistory, { status: "success", title: "Plan complete", detail: `${person.name} has received all planned installments.` });
+        logEvent("payment.installment.skipped", { reason: "plan_complete", personId: person.id, name: person.name });
+        return { dispatched: false, reason: "plan-complete" };
       }
-      const nextPaidCount = paidCount + 1;
-      const complete = nextPaidCount >= schedule.payments;
-      setPeople((current) => current.map((item) => item.id === person.id ? {
-        ...item,
-        paidCount: nextPaidCount,
-        active: complete ? false : item.active,
-        nextRunAt: complete ? null : Date.now() + getFrequencyMs(item),
-      } : item));
+
+      // Payer guard (payment-safety rule): decide everything BEFORE any attempt
+      // record or transaction exists — a payer-bound plan must never be paid
+      // from another wallet, and a mismatch never leaves an attempt behind.
+      const decision = planInstallmentAction(person, {
+        connectedWallet: walletAddress,
+        hasSigningWallet: Boolean(walletProvider === "xrplconnect" || signingWallet),
+        paidCount,
+        plannedPayments: schedule.payments,
+      });
+      if (decision.action === "payer_mismatch") {
+        updatePeople((current) => current.map((item) => item.id === person.id ? { ...item, active: false, nextRunAt: null } : item));
+        setPaymentMessage(`${person.name}'s plan is authorized for payer ${shortAddress(decision.expectedPayer)}, but a different wallet is connected. Reconnect the payer wallet to resume — fresh authorization is required.`);
+        addHistoryItem(setHistory, { status: "paused", title: "Payer mismatch", detail: `${person.name} - expected ${shortAddress(decision.expectedPayer)}, connected ${decision.connectedPayer ? shortAddress(decision.connectedPayer) : "none"}` });
+        logEvent("payment.blocked.payer_mismatch", { personId: person.id, name: person.name, expected: shortAddress(decision.expectedPayer), connected: decision.connectedPayer ? shortAddress(decision.connectedPayer) : "none", source });
+        return { dispatched: false, reason: "payer-mismatch" };
+      }
+      if (decision.action === "missing_wallet_or_destination") {
+        setPaymentMessage(`${person.name} needs a connected wallet and destination address.`);
+        addHistoryItem(setHistory, { status: "waiting", title: "Payment waiting", detail: `${person.name} needs a connected wallet and destination address.` });
+        logEvent("payment.installment.blocked", {
+          reason: "missing_wallet_or_destination",
+          hasSigningWallet: Boolean(walletProvider === "xrplconnect" || signingWallet),
+          hasDestination: Boolean(person.address?.startsWith("r")),
+        });
+        return { dispatched: false, reason: "missing-wallet-or-destination" };
+      }
+
+      setPaymentMessage(walletProvider === "xrplconnect" ? "Confirm the installment in your XRPL wallet..." : "Signing and submitting the installment from the connected wallet...");
+      addHistoryItem(setHistory, { status: "waiting", title: source === "manual" ? "Manual payment started" : "Scheduled payment started", detail: `${person.name} - ${money(schedule.perPayment, 4)} - source tag ${SOURCE_TAG}` });
+      logEvent("payment.local_signing.started", {
+        transactionType: "Payment",
+        account: shortAddress(walletAddress),
+        destination: shortAddress(person.address),
+        sourceTag: SOURCE_TAG,
+        amount: tokenAmount(schedule.perPayment),
+        issuer: RLUSD_ISSUER,
+      });
+
+      const result = await dispatchInstallment(person, paidCount, source, { amount: tokenAmount(schedule.perPayment) });
+      return reportDispatchResult(person, source, result, schedule);
+    } catch (error) {
+      // The door classifies its own failures; reaching here is a defect in the
+      // dispatch wiring itself. Log it — never swallow.
+      logEvent("payment.dispatch.failed", { personId: person.id, name: person.name, source, error: safeLogPayload(error) });
+      setPaymentMessage(error?.message || "Payment could not be dispatched.");
+      return { dispatched: false, reason: "dispatch-error" };
+    }
+  };
+
+  // UI surfacing for the door's outcomes — messages, history, and logs live
+  // here; every safety decision lives in the dispatcher.
+  const reportDispatchResult = (person, source, result, schedule) => {
+    if (!result.dispatched) {
+      switch (result.reason) {
+        case "already-in-flight":
+          logEvent("payment.blocked.attempt_active", { personId: person.id, name: person.name, source });
+          if (source === "manual") {
+            setPaymentMessage(`${person.name}'s installment is already in flight — wait for the active attempt to resolve before retrying.`);
+            addHistoryItem(setHistory, { status: "waiting", title: "Installment locked", detail: `${person.name} - an attempt for this installment is already in flight.` });
+          }
+          break;
+        case "plan-paused":
+          logEvent("payment.blocked.plan_paused", { personId: person.id, name: person.name, source });
+          if (source === "manual") {
+            setPaymentMessage(`${person.name}'s plan is paused — start the plan to send installments.`);
+            addHistoryItem(setHistory, { status: "paused", title: "Payment blocked", detail: `${person.name} - the plan is paused; start it to send installments.` });
+          }
+          break;
+        case "needs-approval":
+          logEvent("payment.blocked.needs_approval", { personId: person.id, name: person.name, source });
+          if (source === "manual") {
+            setPaymentMessage(`${person.name} has a missed installment awaiting your approval — approve or skip it before sending.`);
+            addHistoryItem(setHistory, { status: "waiting", title: "Approval needed", detail: `${person.name} - a missed installment waits for explicit approval.` });
+          }
+          break;
+        case "unresolved-attempt":
+          logEvent("payment.blocked.unresolved", { personId: person.id, name: person.name, source });
+          if (source === "manual") {
+            setPaymentMessage(`${person.name}'s earlier submission is still being verified with the ledger — it must be reconciled before another attempt.`);
+            addHistoryItem(setHistory, { status: "waiting", title: "Verifying with ledger", detail: `${person.name} - an earlier submission for this installment is unclassified.` });
+          }
+          break;
+        case "already-validated":
+          logEvent("payment.blocked.already_validated", { personId: person.id, name: person.name, source });
+          if (source === "manual") {
+            setPaymentMessage(`${person.name}'s installment was already validated on the ledger.`);
+            addHistoryItem(setHistory, { status: "success", title: "Already validated", detail: `${person.name} - this installment is already validated; progress reflects it.` });
+          }
+          break;
+        case "plan-complete":
+          addHistoryItem(setHistory, { status: "success", title: "Plan complete", detail: `${person.name} has received all planned installments.` });
+          logEvent("payment.installment.skipped", { reason: "plan_complete", personId: person.id, name: person.name });
+          break;
+        default:
+          logEvent("payment.blocked.unknown", { personId: person.id, name: person.name, source, reason: result.reason });
+      }
+      return result;
+    }
+
+    const txHash = result.hash;
+    const complete = Boolean(result.complete);
+    if (result.outcome === "validated_success") {
       setPaymentMessage(txHash ? `Payment submitted: ${txHash.slice(0, 10)}...` : "Payment submitted.");
       addHistoryItem(setHistory, { status: "success", title: complete ? "Final payment submitted" : "Payment submitted", detail: txHash ? `${person.name} - ${money(schedule.perPayment, 4)} - tag ${SOURCE_TAG} - ${txHash}` : `${person.name} - ${money(schedule.perPayment, 4)} - tag ${SOURCE_TAG}` });
       logEvent("payment.submitted", {
         personId: person.id,
         name: person.name,
         hash: txHash || null,
-        nextPaidCount,
+        nextPaidCount: result.nextPaidCount,
         complete,
         nextRunAt: complete ? null : Date.now() + getFrequencyMs(person),
       });
-    } catch (error) {
-      try {
-        // No hash reached the caller: per the machine's transition table a
-        // pre-submission failure is validated_failure — terminal but retry-safe,
-        // so the installment may number a fresh attempt on the next dispatch.
-        updateAttempt(attempt.id, "validated_failure", { errorClass: /reject|cancel/i.test(error?.message || "") ? "sign_rejected" : "network" });
-      } catch (storeError) {
-        logEvent("payment.attempt.record_failed", { attemptId: attempt.id, error: safeLogPayload(storeError) });
+      return result;
+    }
+    if (result.outcome === "unresolved") {
+      setPaymentMessage(`Submitted as ${txHash.slice(0, 10)}... before the outcome was known — Cadence is verifying it with the ledger.`);
+      addHistoryItem(setHistory, { status: "waiting", title: "Verifying with ledger", detail: `${person.name} - ${money(schedule.perPayment, 4)} - ${txHash} - outcome not yet known` });
+      logEvent("payment.unresolved", { personId: person.id, name: person.name, hash: txHash, source });
+      return result;
+    }
+    // validated_failure — a failed attempt: surfaced, never advanced, never
+    // silently retried. Retry is a fresh, user-initiated attempt.
+    const reason = result.failureReason || result.error?.message || "The payment could not be completed.";
+    setPaymentMessage(reason);
+    addHistoryItem(setHistory, { status: "failed", title: "Payment not submitted", detail: `${person.name} - ${reason}` });
+    logEvent("payment.failed", { personId: person.id, name: person.name, source, error: safeLogPayload(result.error) });
+    return result;
+  };
+
+  // --- Mount recovery (PR 04 wave 4): restore -> reconcile -> assess -------
+  //
+  // Restored plans land in state before first paint (the useState initializer
+  // above). This section finishes the story in the spec's strict order:
+  // every unresolved attempt is classified by a ledger lookup BEFORE anything
+  // can dispatch, then missed windows are counted and surfaced for explicit
+  // approval. Nothing here dispatches — the only submit path is the guarded
+  // door, and the durable attempt guard blocks unresolved installments even
+  // while recovery is still in flight.
+  const recoveryInFlightRef = useRef(false);
+  const reconcilingKeysRef = useRef(new Set());
+
+  // One keyed classification write: the attempt record lands under its
+  // deterministic installment id, and a reconciled SUCCESS advances the plan
+  // exactly once (only when the settled attempt is still the plan's current
+  // installment — the same guard the dispatcher's advance uses).
+  const settleRecoveredAttempt = (planId, key, attempt, { advance = false } = {}) => {
+    updatePeople((current) => current.map((item) => {
+      if (item.id !== planId) return item;
+      const nextAttempts = { ...(item.attempts || {}), [key]: attempt };
+      if (!advance) return { ...item, attempts: nextAttempts };
+      const paidCount = Number(item.paidCount || 0);
+      if (paidCount !== attempt.sequence) return { ...item, attempts: nextAttempts };
+      const nextPaidCount = paidCount + 1;
+      const complete = nextPaidCount >= getSchedule(item).payments;
+      const nextMissed = Math.max(0, Number(item.missedCount || 0) - 1);
+      return {
+        ...item,
+        attempts: nextAttempts,
+        paidCount: nextPaidCount,
+        active: complete ? false : item.active,
+        nextRunAt: complete ? null : Date.now() + getFrequencyMs(item),
+        missedCount: nextMissed,
+        catchUpPending: !complete && nextMissed > 0,
+      };
+    }));
+  };
+
+  // Reconciliation runs at mount and on an explicit "Reconcile now" — never
+  // on a timer. StrictMode's double-invoked mount effect is absorbed here:
+  // the second invocation meets the in-flight flag and the per-key guard, so
+  // a lookup (and its exactly-once advance) can never run twice.
+  const runRecovery = async () => {
+    if (recoveryInFlightRef.current) return;
+    recoveryInFlightRef.current = true;
+    try {
+      const plans = peopleRef.current;
+      if (plans.length === 0) return;
+
+      // Pre-recovery schedule snapshot: missed windows are counted against
+      // the nextRunAt the plan had when the session opened, so a reconciled
+      // success (which moves it) cannot erase the windows behind it.
+      const preNextRunAt = new Map();
+      const recoveredAdvances = new Map();
+
+      // Phase A — reconcile (never dispatches).
+      for (const plan of plans) {
+        preNextRunAt.set(plan.id, plan.nextRunAt);
+        recoveredAdvances.set(plan.id, 0);
+        for (const attempt of Object.values(plan.attempts || {})) {
+          const action = mountAttemptAction(attempt);
+          if (action === "none") continue;
+          const key = installmentId(plan.id, attempt.sequence);
+          if (reconcilingKeysRef.current.has(key)) continue;
+          reconcilingKeysRef.current.add(key);
+          try {
+            if (action === "record-failed") {
+              // The wallet prompt died with the previous session: nothing was
+              // submitted, so there is nothing to reconcile — a failed attempt
+              // the card surfaces. Never an advance, never an auto-retry.
+              settleRecoveredAttempt(plan.id, key, { ...attempt, status: "validated_failure" });
+              addHistoryItem(setHistory, { status: "failed", title: "Recovered attempt failed", detail: `${plan.name || "Plan"} - installment #${attempt.sequence + 1} was awaiting wallet confirmation when the app closed; nothing was submitted.` });
+              logEvent("recovery.attempt_recorded_failed", { personId: plan.id, key });
+            } else {
+              logEvent("recovery.reconcile_started", { personId: plan.id, key, hash: attempt.hash ? `${String(attempt.hash).slice(0, 10)}...` : null });
+              const { outcome } = await lookupTransaction(attempt.hash);
+              if (outcome === OUTCOMES.SUCCESS) {
+                settleRecoveredAttempt(plan.id, key, { ...attempt, status: "validated_success" }, { advance: true });
+                recoveredAdvances.set(plan.id, (recoveredAdvances.get(plan.id) || 0) + 1);
+                addHistoryItem(setHistory, { status: "success", title: "Recovered payment validated", detail: `${plan.name || "Plan"} - installment #${attempt.sequence + 1} was confirmed by the ledger after the reload.` });
+                logEvent("recovery.attempt_validated", { personId: plan.id, key });
+              } else if (outcome === OUTCOMES.FAILURE) {
+                settleRecoveredAttempt(plan.id, key, { ...attempt, status: "validated_failure" });
+                addHistoryItem(setHistory, { status: "failed", title: "Recovered payment failed", detail: `${plan.name || "Plan"} - installment #${attempt.sequence + 1} did not succeed on the ledger; retry is a fresh decision.` });
+                logEvent("recovery.attempt_failed", { personId: plan.id, key });
+              } else {
+                // still_unknown: the installment stays blocked and the card
+                // shows the verifying state. Reconciliation re-runs on the
+                // next mount or via Reconcile now — never a timer loop.
+                settleRecoveredAttempt(plan.id, key, { ...attempt, status: "unresolved" });
+                logEvent("recovery.still_unknown", { personId: plan.id, key });
+              }
+            }
+          } finally {
+            reconcilingKeysRef.current.delete(key);
+          }
+        }
       }
-      setPaymentMessage(error?.message || "Payment was not submitted.");
-      setPeople((current) => current.map((item) => item.id === person.id ? { ...item, nextRunAt: Date.now() + 60000 } : item));
-      addHistoryItem(setHistory, { status: "failed", title: "Payment not submitted", detail: `${person.name} - ${error?.message || "Wallet confirmation was cancelled."}` });
-      logEvent("payment.failed", { personId: person.id, name: person.name, source, error, retryAt: Date.now() + 60000 });
+
+      // Phase B — missed windows, assessed AFTER reconciliation. Only active
+      // plans with a dispatchable next installment are counted (paused plans
+      // and blocked next installments surface their own states); the count is
+      // clamped to the remaining budget so clock drift cannot drive a plan
+      // past its total.
+      const now = Date.now();
+      updatePeople((current) => current.map((plan) => {
+        if (plan.active !== true) return plan;
+        const paidCount = Number(plan.paidCount || 0);
+        const remaining = getSchedule(plan).payments - paidCount;
+        if (remaining <= 0) return plan;
+        if (dispatchBlockReason(plan.attempts?.[installmentId(plan.id, paidCount)])) return plan;
+        const missed = Math.max(
+          0,
+          countMissedWindows({ nextRunAt: preNextRunAt.get(plan.id), frequencyMs: getFrequencyMs(plan), remaining, now })
+            - (recoveredAdvances.get(plan.id) || 0),
+        );
+        if (missed <= 0) return plan;
+        return { ...plan, catchUpPending: true, missedCount: missed };
+      }));
+    } finally {
+      recoveryInFlightRef.current = false;
     }
   };
 
   useEffect(() => {
+    // Recovery states (verifying / missed / recovered) live on the plan
+    // card's detail pane — surface them immediately by selecting the first
+    // restored plan when the user has not chosen one yet. StrictMode's
+    // second run keeps whatever selection already exists.
+    setSelectedId((current) => current ?? peopleRef.current[0]?.id ?? null);
+    void runRecovery();
+  }, []);
+
+  // Explicit approval for ONE missed window: the approved installment is sent
+  // through the same guarded door as the pay button (source "manual") — never
+  // a burst, never an automatic catch-up.
+  const approveMissedInstallment = async (person) => {
+    const remaining = Number(person?.missedCount || 0);
+    if (person?.catchUpPending !== true || remaining <= 0) return;
+    logEvent("recovery.window_approved", { personId: person.id, name: person.name, remaining });
+    // Open the approval gate for exactly this window's dispatch — the door
+    // refuses catch-up plans, so the approved attempt is a fresh user action.
+    updatePeople((current) => current.map((item) => item.id === person.id ? { ...item, catchUpPending: false } : item));
+    const result = await payInstallment(person, "manual");
+    const current = peopleRef.current.find((item) => item.id === person.id);
+    if (!current || current.active === false) {
+      // Plan finished or paused while the attempt resolved — nothing left to
+      // surface for approval.
+      updatePeople((c) => c.map((item) => item.id === person.id ? { ...item, catchUpPending: false, missedCount: 0 } : item));
+      return;
+    }
+    if (result?.dispatched && result?.outcome === "validated_success") {
+      const nextRemaining = remaining - 1;
+      updatePeople((c) => c.map((item) => item.id === person.id ? { ...item, catchUpPending: nextRemaining > 0, missedCount: nextRemaining } : item));
+      return;
+    }
+    if (result?.dispatched && result?.outcome === "unresolved") {
+      // The approved window's submission is unclassified: the verifying state
+      // owns the card. A reconciled success fills the window and decrements
+      // the counter; a reconciled failure leaves a retryable failed attempt.
+      return;
+    }
+    // The approved attempt failed or was refused: the window stays owed, the
+    // prompt re-arms (approve again, skip, or retry via the pay button).
+    updatePeople((c) => c.map((item) => item.id === person.id ? { ...item, catchUpPending: true, missedCount: remaining } : item));
+  };
+
+  // Skipping gives up the missed window's installment: the schedule slides one
+  // period forward so the plan's next send lands after the abandoned window.
+  const skipMissedWindow = (person) => {
+    const remaining = Number(person?.missedCount || 0);
+    if (person?.catchUpPending !== true || remaining <= 0) return;
+    const nextRemaining = remaining - 1;
+    logEvent("recovery.window_skipped", { personId: person.id, name: person.name, remaining });
+    updatePeople((current) => current.map((item) => {
+      if (item.id !== person.id) return item;
+      const nextRunAt = item.nextRunAt != null ? item.nextRunAt + getFrequencyMs(item) : item.nextRunAt;
+      return { ...item, catchUpPending: nextRemaining > 0, missedCount: nextRemaining, nextRunAt };
+    }));
+    addHistoryItem(setHistory, { status: "paused", title: "Missed window skipped", detail: `${person.name} - installment #${Number(person.paidCount || 0) + 1} was skipped; the plan resumes at its next window.` });
+  };
+
+  const reconcileNow = (person) => {
+    logEvent("recovery.manual_reconcile", { personId: person.id, name: person.name });
+    void runRecovery();
+  };
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
-      const duePerson = people.find((person) =>
+      // Every due plan gets its own dispatch; the guarded door serializes per
+      // installment (plan A's in-flight payment never blocks plan B's due
+      // tick, and no entry point can double-send one installment). Catch-up
+      // plans are excluded — a missed window never auto-fires; it waits for
+      // an explicit approval.
+      const duePeople = people.filter((person) =>
         person.active &&
+        !person.catchUpPending &&
         person.nextRunAt &&
         Number(person.nextRunAt) <= Date.now() &&
         Number(person.paidCount || 0) < getSchedule(person).payments
       );
-      if (!duePerson || autoPayingRef.current) return;
-      logEvent("scheduler.due_person_found", {
-        personId: duePerson.id,
-        name: duePerson.name,
-        nextRunAt: duePerson.nextRunAt,
-        paidCount: duePerson.paidCount || 0,
-        schedule: getSchedule(duePerson),
-      });
-      autoPayingRef.current = true;
-      payInstallment(duePerson, "scheduled").finally(() => {
-        autoPayingRef.current = false;
-      });
+      for (const duePerson of duePeople) {
+        logEvent("scheduler.due_person_found", {
+          personId: duePerson.id,
+          name: duePerson.name,
+          nextRunAt: duePerson.nextRunAt,
+          paidCount: duePerson.paidCount || 0,
+          schedule: getSchedule(duePerson),
+        });
+        // payInstallment classifies its own failures and cannot reject; this
+        // catch is a wiring-defect tripwire that logs instead of vanishing.
+        payInstallment(duePerson, "scheduled").catch((error) => {
+          logEvent("payment.dispatch.failed", { personId: duePerson.id, name: duePerson.name, source: "scheduled", error: safeLogPayload(error) });
+        });
+      }
     }, 10000);
 
     return () => window.clearInterval(timer);
   }, [people, signingWallet, walletProvider, walletAddress]);
   const resetWallet = () => {
     logEvent("wallet.reset", { previousWallet: walletAddress ? shortAddress(walletAddress) : "none", peopleCount: people.length });
+    clearStartTimer();
     setScreen("intro");
     setAccessInput("");
     setExpectedAddress("");
@@ -1558,6 +1840,13 @@ export default function CadenceDashboard() {
         .plan-meter span { color: ${theme.textMuted}; font-size: 10px; }
         .plan-meter strong { margin-top: 4px; font-size: 12px; }
         .inline-note, .safe-payment-note { color: ${theme.textMuted}; font-size: 11px; line-height: 1.5; }
+        .recovery-note { margin-top: 14px; padding: 12px 14px; border: 1px solid ${theme.hairline}; border-radius: 12px; background: ${theme.fillSoft}; font-size: 12px; line-height: 1.5; color: ${theme.textMuted}; }
+        .recovery-note b { display: block; color: ${theme.textPrimary}; font-size: 13px; }
+        .recovery-note span { display: block; margin-top: 4px; }
+        .recovery-note .details-actions { margin-top: 12px; margin-bottom: 0; }
+        .recovery-verifying { border-color: color-mix(in srgb, ${theme.accent2} 45%, transparent); }
+        .recovery-verifying b { color: ${theme.accent2}; }
+        .recovery-missed { border-color: color-mix(in srgb, ${theme.accent} 45%, transparent); }
         .safe-payment-note { padding: 12px; margin-top: 20px; background: ${theme.fillSoft}; border-left: 2px solid ${theme.accent2}; border-radius: 10px; }
         .safe-payment-note span { color: ${theme.accent2}; margin-right: 6px; }
         .footer-note { max-width: 760px; margin: 24px auto 0; text-align: center; line-height: 1.5; }
@@ -1692,7 +1981,7 @@ export default function CadenceDashboard() {
             <div className="app-shell"><header className="topbar"><CadenceLockup compact /><Button kind="ghost" onClick={() => setEditorOpen(false)}>Back to dashboard</Button></header><main className="dashboard-content"><PersonEditor person={editingPerson} onSave={savePerson} onCancel={() => { setEditorOpen(false); setEditingPerson(null); }} /></main></div>
           ) : dashboardView === "employee" ? (
             <EmployeeDashboard walletAddress={walletAddress} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} people={people} onBack={() => setDashboardView("employer")} onExportLogs={exportLogs} onReset={resetWallet} />
-          ) : <Dashboard walletAddress={walletAddress} walletProvider={walletProvider} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} onOpenFunding={() => setShowFunding(true)} onReset={resetWallet} people={people} onAdd={() => { setEditingPerson(null); setEditorOpen(true); }} selectedId={selectedId} onSelect={setSelectedId} onSave={savePerson} onEdit={(person) => { setEditingPerson(person); setEditorOpen(true); }} onToggle={togglePlan} onPay={payInstallment} paymentMessage={paymentMessage} history={history} onExportLogs={exportLogs} onOpenEmployee={() => setDashboardView("employee")} />}
+          ) : <Dashboard walletAddress={walletAddress} walletProvider={walletProvider} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} onOpenFunding={() => setShowFunding(true)} onReset={resetWallet} people={people} onAdd={() => { setEditingPerson(null); setEditorOpen(true); }} selectedId={selectedId} onSelect={setSelectedId} onSave={savePerson} onEdit={(person) => { setEditingPerson(person); setEditorOpen(true); }} onToggle={togglePlan} onPay={payInstallment} onApproveMissed={approveMissedInstallment} onSkipMissed={skipMissedWindow} onReconcileNow={reconcileNow} paymentMessage={paymentMessage} history={history} onExportLogs={exportLogs} onOpenEmployee={() => setDashboardView("employee")} />}
           {showFunding && <FundingModal onClose={() => setShowFunding(false)} />}
         </>
       )}

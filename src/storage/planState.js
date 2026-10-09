@@ -61,6 +61,21 @@ function sanitizeAttempts(attempts, planId) {
   return next;
 }
 
+// Public schedule/display fields. Without these a restored plan cannot render
+// its meter ("2 / total" needs the schedule) or resume its cadence — they are
+// the spec envelope's "schedule state". All public data; secrets stay
+// excluded by the closed allowlist.
+const PLAN_FIELD_KEYS = [
+  "name",
+  "role",
+  "email",
+  "payMode",
+  "weeklyPay",
+  "hourlyPay",
+  "hoursPerWeek",
+  "frequency",
+];
+
 // Returns an allowlisted plan, or null when the plan has no identity —
 // without an id it cannot be keyed or restored, so it does not persist.
 function sanitizePlan(plan) {
@@ -70,10 +85,15 @@ function sanitizePlan(plan) {
   return {
     id,
     payer: asString(plan.payer),
-    destination: asString(plan.destination),
+    // The dashboard's plan objects carry the destination address as `address`
+    // (the editor form field); it persists under the spec envelope's
+    // `destination` key. Accept both on input so the storage layer stays
+    // decoupled from the dashboard's field name.
+    destination: asString(plan.destination ?? plan.address),
     paidCount: asCount(plan.paidCount),
     nextRunAt: asStamp(plan.nextRunAt),
     active: plan.active === true,
+    ...Object.fromEntries(PLAN_FIELD_KEYS.map((key) => [key, asString(plan[key])])),
     attempts: sanitizeAttempts(plan.attempts, id),
   };
 }
