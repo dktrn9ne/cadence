@@ -1,21 +1,32 @@
-// The React seam over the payments store: hydrate on mount (recovery before
-// any timer runs), persist on change only after hydration, and expose the
-// status the dashboard gates dispatch on.
+// The React seam over the durable payment record: hydrate the record document
+// on mount (recovery before any timer runs), persist on change only after
+// hydration, and expose the status the dashboard gates dispatch on.
+//
+// Scope on the merged stack: the record document is history + journal
+// (cadence.payments.v1, src/storage/paymentsStore.js). Plans restore
+// synchronously via planState (cadence-plans-v1) before this hook mounts, so
+// this hook does not write plan state — it folds planState's load/write
+// failures into the same storage banner and dispatch gate the record status
+// drives.
 //
 // Guarantees:
-// - No state change is persisted before hydration resolves, so a stale empty
+// - No record change is persisted before hydration resolves, so a stale empty
 //   render can never overwrite the durable document.
-// - Hydration is a recovery sequence: in-flight attempts become `unresolved`
-//   (append-only, idempotent under StrictMode's double mount), overdue
-//   nextRunAt values clamp into the grace window, and plans pinned to a
-//   different payer pause when a wallet is already connected.
+// - Hydration is a recovery sequence: journal attempts that were in flight
+//   when the app died become `unresolved` (append-only, idempotent under
+//   StrictMode's double mount). Plan-level recovery (missed windows, attempt
+//   maps) belongs to the dispatcher/recovery stack and runs there.
 // - A failing write (quota, privacy mode) halts dispatch visibly and clears
 //   itself the next time a write succeeds.
-// - corrupt / unknown_version start the app empty with the raw payload
+// - corrupt / unknown_version start the record empty with the raw payload
 //   quarantined; dispatch stays halted until the user acknowledges.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { load, save } from "./paymentsStore.js";
-import { PAYER_MATCH, clampOverdue, payerMatchesPlan } from "../domain/installments.js";
+import {
+  acknowledgePlanStateIssue,
+  getPlanStateStatus,
+  subscribePlanStateStatus,
+} from "./planState.js";
 import { reconcileInFlightAttempts } from "../domain/journal.js";
 
 export const STORAGE_STATES = Object.freeze([
@@ -34,16 +45,41 @@ export const isHaltingState = (state) => HALTING_STATES.includes(state);
 
 const HYDRATING = Object.freeze({ state: "hydrating", message: null });
 
+// Which of two statuses wins the single banner: the more severe state, with
+// halting states above advisory ones.
+const STATE_RANK = Object.freeze({
+  hydrating: 0,
+  ready: 0,
+  recovered: 1,
+  invalid_rows: 2,
+  corrupt: 3,
+  unknown_version: 3,
+  write_failed: 4,
+});
+
+const mergeStatus = (a, b) => {
+  if (!a) return b;
+  if (!b) return a;
+  return (STATE_RANK[a.state] ?? 0) >= (STATE_RANK[b.state] ?? 0) ? a : b;
+};
+
 export function useDurablePayments({
-  people,
   history,
   journal,
   journalSeq,
-  walletAddress = "",
   applyHydratedState,
 }) {
   const [hydrated, setHydrated] = useState(false);
-  const [storageStatus, setStorageStatus] = useState(HYDRATING);
+  const [recordStatus, setRecordStatus] = useState(HYDRATING);
+  // planState loads synchronously during the dashboard's first render, so its
+  // load-time status can already be a failure before this effect subscribes —
+  // subscribe() replays the current status immediately.
+  const [planStateStatus, setPlanStateStatus] = useState(() => getPlanStateStatus());
+
+  useEffect(
+    () => subscribePlanStateStatus((next) => setPlanStateStatus({ ...next })),
+    [],
+  );
 
   // Refs mirror the gate for synchronous checks inside effects and keep the
   // latest callback without retriggering the hydration effect.
@@ -57,11 +93,11 @@ export function useDurablePayments({
     if (result.ok) {
       // A write succeeding after a halt clears the halt; otherwise leave the
       // current status (recovery set it) alone.
-      setStorageStatus((current) =>
+      setRecordStatus((current) =>
         current.state === "write_failed" ? { state: "ready", message: null } : current,
       );
     } else {
-      setStorageStatus({
+      setRecordStatus({
         state: "write_failed",
         message: "Payments are not being saved — they will not survive a restart.",
         writeError: result.reason,
@@ -78,12 +114,12 @@ export function useDurablePayments({
       const result = await load();
 
       if (result.status === "corrupt" || result.status === "unknown_version") {
-        setStorageStatus({
+        setRecordStatus({
           state: result.status,
           message:
             result.status === "corrupt"
-              ? "Stored payment data failed validation and was quarantined. Starting empty."
-              : `Stored payment data was written by a newer version (schema ${result.schemaVersion}). Starting empty.`,
+              ? "Stored payment records failed validation and were quarantined. Starting empty."
+              : `Stored payment records were written by a newer version (schema ${result.schemaVersion}). Starting empty.`,
           quarantined: result.quarantine?.stored ?? false,
           schemaVersion: result.schemaVersion,
           reason: result.reason,
@@ -94,39 +130,21 @@ export function useDurablePayments({
       }
 
       if (result.status === "empty") {
-        setStorageStatus({ state: "ready", message: null });
+        setRecordStatus({ state: "ready", message: null });
         hydratedRef.current = true;
         setHydrated(true);
         return;
       }
 
-      // ok / invalid: recover before activation.
-      const now = Date.now();
+      // ok / invalid: recover the record before activation — attempts that
+      // were in flight at shutdown become `unresolved`, never auto-retried.
       const recovered = reconcileInFlightAttempts(
         { journal: result.data.journal, journalSeq: result.data.journalSeq },
-        now,
+        Date.now(),
       );
-      const plans = result.data.plans.map((plan) => ({
-        ...plan,
-        nextRunAt: clampOverdue(plan.nextRunAt, now),
-      }));
-
-      // Hydration-time payer pause: only meaningful when a wallet is already
-      // connected; mid-session wallet changes are refused at dispatch time.
-      const pausedPlans = [];
-      if (walletAddress) {
-        for (const plan of plans) {
-          if (payerMatchesPlan(plan, walletAddress) === PAYER_MATCH.MISMATCH) {
-            pausedPlans.push(plan.id);
-            plan.active = false;
-            plan.nextRunAt = null;
-          }
-        }
-      }
 
       const invalidEntries = result.invalidEntries ?? [];
       applyRef.current?.({
-        plans,
         history: result.data.history,
         journal: recovered.journal,
         journalSeq: recovered.journalSeq,
@@ -136,42 +154,46 @@ export function useDurablePayments({
       setHydrated(true);
 
       if (invalidEntries.length > 0) {
-        setStorageStatus({
+        setRecordStatus({
           state: "invalid_rows",
-          message: `${invalidEntries.length} stored plan${invalidEntries.length === 1 ? "" : "s"} failed validation and ${invalidEntries.length === 1 ? "was" : "were"} excluded.`,
+          message: `${invalidEntries.length} stored record ${invalidEntries.length === 1 ? "row was" : "rows were"} excluded for failing validation.`,
           invalidEntries,
         });
         return;
       }
 
       const recoveredCount = recovered.recovered.length;
-      setStorageStatus(
+      setRecordStatus(
         recoveredCount > 0
           ? {
               state: "recovered",
-              message: `${recoveredCount} payment${recoveredCount === 1 ? "" : "s"} need${recoveredCount === 1 ? "s" : ""} review after restart.`,
+              message: `${recoveredCount} payment${recoveredCount === 1 ? " needs" : "s need"} review after restart.`,
               recovered,
-              pausedPlans,
             }
-          : { state: "ready", message: null, pausedPlans: pausedPlans.length > 0 ? pausedPlans : undefined },
+          : { state: "ready", message: null },
       );
     })();
-  }, [walletAddress]);
+  }, []);
 
-  // Persistence: every state change after hydration, never before. The ref
+  // Persistence: every record change after hydration, never before. The ref
   // gate is synchronous so even a same-tick change cannot write pre-hydration.
   useEffect(() => {
     if (!hydratedRef.current) return;
-    persist({ plans: people, history, journal, journalSeq });
-  }, [people, history, journal, journalSeq, persist]);
+    persist({ history, journal, journalSeq });
+  }, [history, journal, journalSeq, persist]);
 
   const acknowledgeStorageIssue = useCallback(() => {
-    setStorageStatus((current) =>
+    // Both documents can be in a halting state independently; acknowledging
+    // clears both visible failures. Quarantined payloads stay aside.
+    acknowledgePlanStateIssue();
+    setRecordStatus((current) =>
       current.state === "corrupt" || current.state === "unknown_version" || current.state === "invalid_rows"
         ? { state: "ready", message: null }
         : current,
     );
   }, []);
+
+  const storageStatus = mergeStatus(recordStatus, planStateStatus);
 
   return {
     hydrated,

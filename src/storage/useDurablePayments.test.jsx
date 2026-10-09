@@ -1,4 +1,10 @@
-// Hydration-hook integration tests. Fixtures only — never a live seed.
+// Hydration-hook integration tests over the durable payment record.
+// Fixtures only — never a live seed.
+//
+// Scope note: this hook owns the RECORD document (history + journal). Plans
+// restore synchronously via planState before this hook mounts, so plan-level
+// restoration, overdue clamping, and hydration-time payer pauses belong to
+// the planState/recovery stack — covered there and in the wiring tests.
 import React, { useCallback, useState } from "react";
 import { act, render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,28 +13,13 @@ import { QUARANTINE_KEY, STORE_KEY, checksumOf, save } from "./paymentsStore.js"
 import { OUTCOME_LABELS } from "../domain/installments.js";
 
 const PAYER = "rFixtur3PayerAcct11111111111111111111";
-const OTHER = "rFixtur3OtherAcct111111111111111111111";
 const DEST = "rFixtur3DestAcct11111111111111111111";
 const HASH = "44F0FAKEHASH0000000000000000000000000000000000000000000000000000";
 
 // Created once per module so timestamps cannot drift between fixture and
 // assertion.
-const FUTURE_RUN_AT = Date.now() + 60_000;
 const AT_START = "2026-10-09T17:41:02.000Z";
 const AT_OUTCOME = "2026-10-09T17:41:05.000Z";
-
-const planFixture = (overrides = {}) => ({
-  id: "person-1734",
-  name: "Fixture Person",
-  address: DEST,
-  payerAddress: PAYER,
-  weeklyPay: "16",
-  frequency: "minute",
-  active: true,
-  paidCount: 3,
-  nextRunAt: FUTURE_RUN_AT,
-  ...overrides,
-});
 
 const startedEntry = (seq = 1) => ({
   seq,
@@ -69,7 +60,6 @@ const historyFixture = () => [
 ];
 
 const docFixture = (overrides = {}) => ({
-  plans: [planFixture()],
   history: historyFixture(),
   journal: settledJournal(),
   journalSeq: 2,
@@ -77,28 +67,26 @@ const docFixture = (overrides = {}) => ({
 });
 
 // Two-way harness: the hook hydrates back into the same state that feeds it,
-// mirroring how the dashboard will consume it.
-function Harness({ walletAddress = "", capture }) {
-  const [doc, setDoc] = useState({ plans: [], history: [], journal: [], journalSeq: 0 });
+// mirroring how the dashboard consumes it.
+function Harness({ capture }) {
+  const [doc, setDoc] = useState({ history: [], journal: [], journalSeq: 0 });
   const applyHydratedState = useCallback((next) => setDoc(next), []);
   const hook = useDurablePayments({
-    people: doc.plans,
     history: doc.history,
     journal: doc.journal,
     journalSeq: doc.journalSeq,
-    walletAddress,
     applyHydratedState,
   });
   capture({ hook, doc, setDoc });
   return null;
 }
 
-const renderHarness = ({ walletAddress, strict = false } = {}) => {
+const renderHarness = ({ strict = false } = {}) => {
   const ref = { current: null };
   const capture = (value) => {
     ref.current = value;
   };
-  const tree = <Harness walletAddress={walletAddress} capture={capture} />;
+  const tree = <Harness capture={capture} />;
   render(strict ? <React.StrictMode>{tree}</React.StrictMode> : tree);
   return ref;
 };
@@ -113,13 +101,12 @@ beforeEach(() => {
 });
 
 describe("hydration", () => {
-  it("restores plans, history, and journal from storage (survive restart)", async () => {
+  it("restores history and the journal from storage (survive restart)", async () => {
     await save(docFixture());
     const ref = renderHarness();
     await hydratedState(ref);
 
     const { doc } = ref.current;
-    expect(doc.plans).toEqual([planFixture()]);
     expect(doc.history).toEqual(historyFixture());
     expect(doc.journal).toEqual(settledJournal());
     expect(doc.journalSeq).toBe(2);
@@ -131,9 +118,10 @@ describe("hydration", () => {
     const ref = renderHarness();
     await hydratedState(ref);
 
-    // The stored plan is still there after hydration's own first save.
+    // The stored records are still there after hydration's own first save.
     const stored = JSON.parse(localStorage.getItem(STORE_KEY));
-    expect(stored.plans.map((plan) => plan.id)).toEqual(["person-1734"]);
+    expect(stored.history).toHaveLength(1);
+    expect(stored.journal).toHaveLength(2);
   });
 
   it("reports ready on a fresh install and persists later changes", async () => {
@@ -146,7 +134,7 @@ describe("hydration", () => {
     });
     await waitFor(() => {
       const stored = JSON.parse(localStorage.getItem(STORE_KEY) ?? "null");
-      expect(stored?.plans?.[0]?.id).toBe("person-1734");
+      expect(stored?.journalSeq).toBe(2);
     });
   });
 });
@@ -165,35 +153,6 @@ describe("recovery on load", () => {
     expect(ref.current.doc.journal[0]).toEqual(startedEntry()); // append-only: original intact
     expect(ref.current.hook.storageStatus.state).toBe("recovered");
   });
-
-  it("clamps overdue nextRunAt into the grace window — never fires instantly", async () => {
-    const overdue = Date.now() - 999_999;
-    await save(docFixture({ plans: [planFixture({ nextRunAt: overdue })] }));
-    const ref = renderHarness();
-    await hydratedState(ref);
-
-    const clamped = ref.current.doc.plans[0].nextRunAt;
-    expect(clamped).toBeGreaterThan(Date.now() + 30_000);
-    expect(ref.current.hook.storageHalted).toBe(false);
-  });
-
-  it("pauses plans pinned to a different connected wallet at hydration", async () => {
-    await save(docFixture());
-    const ref = renderHarness({ walletAddress: OTHER });
-    await hydratedState(ref);
-
-    expect(ref.current.doc.plans[0].active).toBe(false);
-    expect(ref.current.doc.plans[0].nextRunAt).toBeNull();
-  });
-
-  it("keeps legacy unpinned plans dispatchable", async () => {
-    await save(docFixture({ plans: [{ ...planFixture(), payerAddress: undefined }] }));
-    const ref = renderHarness({ walletAddress: OTHER });
-    await hydratedState(ref);
-
-    expect(ref.current.doc.plans[0].active).toBe(true);
-    expect(ref.current.doc.plans[0].nextRunAt).toBe(FUTURE_RUN_AT);
-  });
 });
 
 describe("load failure states in the hook", () => {
@@ -204,7 +163,8 @@ describe("load failure states in the hook", () => {
 
     expect(ref.current.hook.storageStatus.state).toBe("corrupt");
     expect(ref.current.hook.storageHalted).toBe(true);
-    expect(ref.current.doc.plans).toEqual([]);
+    expect(ref.current.doc.history).toEqual([]);
+    expect(ref.current.doc.journal).toEqual([]);
     expect(localStorage.getItem(QUARANTINE_KEY)).not.toBeNull();
 
     act(() => {
@@ -224,15 +184,15 @@ describe("load failure states in the hook", () => {
 
     expect(ref.current.hook.storageStatus.state).toBe("unknown_version");
     expect(ref.current.hook.storageHalted).toBe(true);
-    expect(ref.current.doc.plans).toEqual([]);
+    expect(ref.current.doc.history).toEqual([]);
     const quarantined = JSON.parse(localStorage.getItem(QUARANTINE_KEY));
     expect(quarantined.schemaVersion).toBe(99);
   });
 
-  it("excludes invalid rows but does not halt dispatch", async () => {
+  it("excludes invalid record rows but does not halt dispatch", async () => {
     await save(docFixture());
     const stored = JSON.parse(localStorage.getItem(STORE_KEY));
-    stored.plans.push({ ...planFixture({ id: "person-bad", frequency: "fortnight" }) });
+    stored.journal.push({ seq: 0, type: "attempt_started", installmentId: "no-seq" });
     const { checksum, ...payload } = stored;
     stored.checksum = await checksumOf(payload);
     localStorage.setItem(STORE_KEY, JSON.stringify(stored));
@@ -240,7 +200,7 @@ describe("load failure states in the hook", () => {
     const ref = renderHarness();
     await hydratedState(ref);
 
-    expect(ref.current.doc.plans.map((plan) => plan.id)).toEqual(["person-1734"]);
+    expect(ref.current.doc.journal.map((entry) => entry.seq)).toEqual([1, 2]);
     expect(ref.current.hook.storageStatus.state).toBe("invalid_rows");
     expect(ref.current.hook.storageHalted).toBe(false);
   });
@@ -267,5 +227,29 @@ describe("write failure handling", () => {
     });
     await waitFor(() => expect(ref.current.hook.storageHalted).toBe(false));
     expect(ref.current.hook.storageStatus.state).toBe("ready");
+  });
+
+  it("folds a planState write failure into the same halt", async () => {
+    // planState is a separate document with its own write path; its failure
+    // must surface through the same banner and gate, not a second channel.
+    const { recordAttempt } = await import("./planState.js");
+    const ref = renderHarness();
+    await hydratedState(ref);
+    expect(ref.current.hook.storageHalted).toBe(false);
+
+    const spy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
+    // Attempts write immediately (they bypass savePlans' debounce).
+    act(() => {
+      recordAttempt([{ id: "person-planstate", attempts: {} }], "person-planstate", {
+        sequence: 1,
+        status: "attempting",
+        amount: "1.000000",
+      });
+    });
+    await waitFor(() => expect(ref.current.hook.storageHalted).toBe(true));
+    expect(ref.current.hook.storageStatus.state).toBe("write_failed");
+    spy.mockRestore();
   });
 });
