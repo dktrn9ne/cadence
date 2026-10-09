@@ -556,19 +556,47 @@ function PeopleList({ people, selectedId, onSelect, onAdd }) {
   );
 }
 
-function PersonDetails({ person, onEdit, onToggle, onPay, walletReady, paymentMessage }) {
+function PersonDetails({ person, onEdit, onToggle, onPay, onApproveMissed, onSkipMissed, onReconcileNow, walletReady, paymentMessage }) {
   const schedule = getSchedule(person);
   const paidCount = Number(person.paidCount || 0);
   const nextRun = person.nextRunAt ? new Date(person.nextRunAt).toLocaleString() : "Not scheduled";
+  // Recovery states (PR 04): the next installment's durable attempt decides
+  // what the card surfaces. A verifying (unresolved) submission takes
+  // precedence over the missed-window prompt — both block dispatch; the
+  // recovered banner only shows when neither is pending.
+  const nextAttempt = person.attempts?.[installmentId(person.id, paidCount)];
+  const verifying = nextAttempt?.status === "unresolved";
+  const verifyingHash = verifying && nextAttempt.hash ? `${String(nextAttempt.hash).slice(0, 10)}...` : null;
+  const missedCount = Number(person.missedCount || 0);
+  const missedPending = person.catchUpPending === true && missedCount > 0 && !verifying;
+  const lastFailed = nextAttempt?.status === "validated_failure";
   return (
     <div className="details-card">
       <div className="details-top"><div className="large-avatar">{person.name.slice(0, 1).toUpperCase()}</div><div><p className="eyebrow">Selected person</p><h2>{person.name}</h2><p className="muted-line">{person.role || "No role added"} {person.email ? ` ${person.email}` : ""}</p></div><button className="text-button edit-button" onClick={onEdit}>Edit</button></div>
       <div className="address-line"><span>Destination</span><code>{shortAddress(person.address)}</code></div>
       <div className="detail-highlight"><div><span className="eyebrow">Weekly pay</span><strong>{money(schedule.weeklyPay)}</strong><small>recipient amount across 1 week</small></div><div className="highlight-arrow">{">"}</div><div><span className="eyebrow">Each payout</span><strong>{money(schedule.perPayment, 6)}</strong><small>sent directly to the destination wallet</small></div></div>
       <div className="plan-meter"><div><span>Installments sent</span><strong>{paidCount} / {schedule.payments.toLocaleString()}</strong></div><div><span>Next send</span><strong>{nextRun}</strong></div><div><span>Recipient debit</span><strong>{money(schedule.totalPerPayment, 6)}</strong></div><div><span>Source tag</span><strong>{SOURCE_TAG}</strong></div><div><span>Payer</span><strong>{person.payer ? shortAddress(person.payer) : "Not attached"}</strong></div></div>
-      <div className="details-actions"><Button kind={person.active ? "secondary" : "primary"} onClick={onToggle}>{person.active ? "Pause plan" : "Start plan"}</Button><Button kind="secondary" onClick={onPay} disabled={!walletReady || !person.address.startsWith("r")}>Pay one installment</Button></div>
+      {verifying && (
+        <div className="recovery-note recovery-verifying" role="status">
+          <b>Verifying installment #{paidCount + 1} with the ledger…</b>
+          <span>{verifyingHash ? `Submitted as ${verifyingHash} before the app closed — outcome not yet known.` : "An earlier submission has no reconcilable hash yet."}</span>
+        </div>
+      )}
+      {missedPending && (
+        <div className="recovery-note recovery-missed" role="status">
+          <b>{missedCount === 1 ? "1 installment missed while the app was closed" : `${missedCount} installments missed while the app was closed`}</b>
+          <span>Approve to send installment #{paidCount + 1} through the normal wallet flow — one installment per approval.</span>
+          <div className="details-actions"><Button onClick={() => onApproveMissed(person)}>Approve send</Button><Button kind="secondary" onClick={() => onSkipMissed(person)}>Skip this window</Button></div>
+        </div>
+      )}
+      {person.recovered === true && !verifying && !missedPending && (
+        <div className="recovery-note" role="status">Recovered from last session — up to date</div>
+      )}
+      <div className="details-actions"><Button kind={person.active ? "secondary" : "primary"} onClick={onToggle}>{person.active ? "Pause plan" : "Start plan"}</Button><Button kind="secondary" onClick={onPay} disabled={!walletReady || !person.address.startsWith("r") || verifying}>Pay one installment</Button>{verifying && <Button kind="secondary" onClick={() => onReconcileNow(person)}>Reconcile now</Button>}</div>
       {!walletReady && <p className="inline-note">Connect a wallet first to make an on-chain payment.</p>}
       {walletReady && !person.address.startsWith("r") && <p className="inline-note">Add a public XRPL destination address before paying.</p>}
+      {verifying && <p className="inline-note">Paying is blocked until the ledger classifies the earlier submission — reconcile to unblock.</p>}
+      {lastFailed && <p className="inline-note">The last attempt for installment #{paidCount + 1} failed and did not advance this plan — see payment activity below; retrying is a fresh decision.</p>}
       {paymentMessage && <div className="success-message">{paymentMessage}</div>}
       <div className="safe-payment-note"><span>?</span> Cadence submits one RLUSD payment per interval to the designated destination wallet. Scheduled plans continue until all weekly installments have been sent or you pause the plan.</div>
     </div>
@@ -879,7 +907,7 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
   );
 }
 
-function Dashboard({ walletAddress, walletProvider, rlusdBalance, balanceLoading, onRefreshBalance, onOpenFunding, onReset, people, onAdd, selectedId, onSelect, onSave, onEdit, onToggle, onPay, paymentMessage, history, onExportLogs, onOpenEmployee }) {
+function Dashboard({ walletAddress, walletProvider, rlusdBalance, balanceLoading, onRefreshBalance, onOpenFunding, onReset, people, onAdd, selectedId, onSelect, onSave, onEdit, onToggle, onPay, onApproveMissed, onSkipMissed, onReconcileNow, paymentMessage, history, onExportLogs, onOpenEmployee }) {
   const selectedPerson = people.find((person) => person.id === selectedId);
   const walletReady = Boolean((walletProvider === "xrplconnect" || walletProvider === "local") && walletAddress?.startsWith("r"));
   const providerLabel = walletProvider === "xrplconnect" ? "XRPL wallet" : "Local wallet";
@@ -910,7 +938,7 @@ function Dashboard({ walletAddress, walletProvider, rlusdBalance, balanceLoading
           secondaryAction={rlusdBalance <= 0 ? <Button kind="soft" onClick={onOpenFunding}>Add RLUSD</Button> : null}
         />
         <section className="payer-strip"><div><p className="eyebrow">Payment wallet</p><strong>{shortAddress(walletAddress)}</strong><span>{payerCopy}</span></div><Button kind="secondary" onClick={onReset}>Change wallet</Button></section>
-        <div className="content-grid"><PeopleList people={people} selectedId={selectedId} onSelect={onSelect} onAdd={onAdd} />{selectedPerson ? <PersonDetails person={selectedPerson} onEdit={() => onEdit(selectedPerson)} onToggle={() => onToggle(selectedPerson.id)} onPay={() => onPay(selectedPerson)} walletReady={walletReady} paymentMessage={paymentMessage} /> : <div className="details-card details-empty"><div className="empty-sun">*</div><h2>Add a recipient to begin.</h2><p>Create a payment plan with a verified XRPL destination address before sending RLUSD.</p><Button onClick={onAdd}>Create payment plan</Button></div>}</div>
+        <div className="content-grid"><PeopleList people={people} selectedId={selectedId} onSelect={onSelect} onAdd={onAdd} />{selectedPerson ? <PersonDetails person={selectedPerson} onEdit={() => onEdit(selectedPerson)} onToggle={() => onToggle(selectedPerson.id)} onPay={() => onPay(selectedPerson)} onApproveMissed={onApproveMissed} onSkipMissed={onSkipMissed} onReconcileNow={onReconcileNow} walletReady={walletReady} paymentMessage={paymentMessage} /> : <div className="details-card details-empty"><div className="empty-sun">*</div><h2>Add a recipient to begin.</h2><p>Create a payment plan with a verified XRPL destination address before sending RLUSD.</p><Button onClick={onAdd}>Create payment plan</Button></div>}</div>
         <section className="history-panel"><div className="card-heading"><div><p className="eyebrow">Payment activity</p><h2>Recent actions</h2></div><Button kind="small" onClick={onExportLogs}>Download support file</Button></div>{history.length === 0 ? <p className="muted-line">No payment activity yet.</p> : <div className="history-list">{history.slice(0, 8).map((item) => <div className={`history-row ${item.status}`} key={item.id}><div><b>{item.title}</b><span>{item.detail}</span></div><time>{new Date(item.at).toLocaleString()}</time></div>)}</div>}</section>
         <p className="footer-note">RLUSD is a dollar-denominated token on the XRP Ledger. Network fees, issuer details, and wallet confirmations should always be checked before sending.</p>
       </main>
@@ -1807,6 +1835,13 @@ export default function CadenceDashboard() {
         .plan-meter span { color: ${theme.textMuted}; font-size: 10px; }
         .plan-meter strong { margin-top: 4px; font-size: 12px; }
         .inline-note, .safe-payment-note { color: ${theme.textMuted}; font-size: 11px; line-height: 1.5; }
+        .recovery-note { margin-top: 14px; padding: 12px 14px; border: 1px solid ${theme.hairline}; border-radius: 12px; background: ${theme.fillSoft}; font-size: 12px; line-height: 1.5; color: ${theme.textMuted}; }
+        .recovery-note b { display: block; color: ${theme.textPrimary}; font-size: 13px; }
+        .recovery-note span { display: block; margin-top: 4px; }
+        .recovery-note .details-actions { margin-top: 12px; margin-bottom: 0; }
+        .recovery-verifying { border-color: color-mix(in srgb, ${theme.accent2} 45%, transparent); }
+        .recovery-verifying b { color: ${theme.accent2}; }
+        .recovery-missed { border-color: color-mix(in srgb, ${theme.accent} 45%, transparent); }
         .safe-payment-note { padding: 12px; margin-top: 20px; background: ${theme.fillSoft}; border-left: 2px solid ${theme.accent2}; border-radius: 10px; }
         .safe-payment-note span { color: ${theme.accent2}; margin-right: 6px; }
         .footer-note { max-width: 760px; margin: 24px auto 0; text-align: center; line-height: 1.5; }
@@ -1941,7 +1976,7 @@ export default function CadenceDashboard() {
             <div className="app-shell"><header className="topbar"><CadenceLockup compact /><Button kind="ghost" onClick={() => setEditorOpen(false)}>Back to dashboard</Button></header><main className="dashboard-content"><PersonEditor person={editingPerson} onSave={savePerson} onCancel={() => { setEditorOpen(false); setEditingPerson(null); }} /></main></div>
           ) : dashboardView === "employee" ? (
             <EmployeeDashboard walletAddress={walletAddress} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} people={people} onBack={() => setDashboardView("employer")} onExportLogs={exportLogs} onReset={resetWallet} />
-          ) : <Dashboard walletAddress={walletAddress} walletProvider={walletProvider} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} onOpenFunding={() => setShowFunding(true)} onReset={resetWallet} people={people} onAdd={() => { setEditingPerson(null); setEditorOpen(true); }} selectedId={selectedId} onSelect={setSelectedId} onSave={savePerson} onEdit={(person) => { setEditingPerson(person); setEditorOpen(true); }} onToggle={togglePlan} onPay={payInstallment} paymentMessage={paymentMessage} history={history} onExportLogs={exportLogs} onOpenEmployee={() => setDashboardView("employee")} />}
+          ) : <Dashboard walletAddress={walletAddress} walletProvider={walletProvider} rlusdBalance={rlusdBalance} balanceLoading={balanceLoading} onRefreshBalance={() => refreshBalance()} onOpenFunding={() => setShowFunding(true)} onReset={resetWallet} people={people} onAdd={() => { setEditingPerson(null); setEditorOpen(true); }} selectedId={selectedId} onSelect={setSelectedId} onSave={savePerson} onEdit={(person) => { setEditingPerson(person); setEditorOpen(true); }} onToggle={togglePlan} onPay={payInstallment} onApproveMissed={approveMissedInstallment} onSkipMissed={skipMissedWindow} onReconcileNow={reconcileNow} paymentMessage={paymentMessage} history={history} onExportLogs={exportLogs} onOpenEmployee={() => setDashboardView("employee")} />}
           {showFunding && <FundingModal onClose={() => setShowFunding(false)} />}
         </>
       )}
