@@ -2,11 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Client, ECDSA, Wallet } from "xrpl";
 import { theme } from "./brand/tokens.js";
 import { CadenceLockup, CadenceMark } from "./brand/CadenceMark.jsx";
+import { RLUSD_CURRENCY, RLUSD_ISSUER, CADENCE_EMPLOYER_WALLET, SOURCE_TAG } from "./domain/xrpl-constants.js";
+import { TIME_UNITS, FREQUENCIES, getSchedule, getFrequencyMs } from "./domain/schedule.js";
+import { buildRlusdPayment, buildCrossmarkRlusdPayment, responseHash } from "./domain/payments.js";
 
-const RLUSD_CURRENCY = "524C555344000000000000000000000000000000";
-const RLUSD_ISSUER = "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De";
-const CADENCE_EMPLOYER_WALLET = "rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864";
-const SOURCE_TAG = 2606250005;
 const LOG_STORAGE_KEY = "cadence-debug-logs-v1";
 const MAX_LOGS = 500;
 
@@ -31,19 +30,6 @@ const MNEMONIC_DERIVATION_OPTIONS = Array.from({ length: 10 }, (_, index) => [
     options: { derivationPath: `m/44'/144'/${index}'/0/0`, algorithm: ECDSA.secp256k1 },
   },
 ]).flat();
-
-const TIME_UNITS = {
-  seconds15: { label: "15 seconds", seconds: 15 },
-  seconds30: { label: "30 seconds", seconds: 30 },
-  minute: { label: "1 minute", seconds: 60 },
-  minutes5: { label: "5 minutes", seconds: 5 * 60 },
-  minutes15: { label: "15 minutes", seconds: 15 * 60 },
-  hour: { label: "1 hour", seconds: 60 * 60 },
-  day: { label: "1 day", seconds: 24 * 60 * 60 },
-  week: { label: "1 week", seconds: 7 * 24 * 60 * 60 },
-};
-
-const FREQUENCIES = ["seconds15", "seconds30", "minute", "minutes5", "minutes15", "hour", "day"];
 
 const emptyPerson = {
   name: "",
@@ -303,30 +289,6 @@ const createWalletFromInput = (method, value, expectedAddress = "") => {
   }
 };
 
-const buildRlusdPayment = ({ wallet, destination, amount }) => ({
-  TransactionType: "Payment",
-  Account: wallet.address,
-  Destination: destination,
-  SourceTag: SOURCE_TAG,
-  Amount: {
-    currency: RLUSD_CURRENCY,
-    issuer: RLUSD_ISSUER,
-    value: amount,
-  },
-});
-
-const buildCrossmarkRlusdPayment = ({ account, destination, amount }) =>
-  buildRlusdPayment({ wallet: { address: account }, destination, amount });
-
-const responseHash = (response) =>
-  response?.response?.data?.resp?.result?.hash ||
-  response?.response?.data?.result?.hash ||
-  response?.data?.resp?.result?.hash ||
-  response?.data?.result?.hash ||
-  response?.result?.hash ||
-  response?.hash ||
-  null;
-
 const getCrossmark = async () => {
   const module = await import("@crossmarkio/sdk");
   return module.default || module;
@@ -405,33 +367,6 @@ const readRlusdBalance = async (address) => {
   );
   return Math.max(0, Number(line?.balance || 0));
 };
-
-const getSchedule = (person) => {
-  const payMode = person.payMode || "weekly";
-  const hourlyPay = Math.max(0, Number(person.hourlyPay) || 0);
-  const hoursPerWeek = Math.max(0, Number(person.hoursPerWeek) || 0);
-  const directWeeklyPay = Math.max(0, Number(person.weeklyPay ?? person.amount) || 0);
-  const weeklyPay = payMode === "hourly" ? hourlyPay * hoursPerWeek : directWeeklyPay;
-  const frequency = TIME_UNITS[person.frequency] || TIME_UNITS.minute;
-  const payments = Math.max(1, Math.floor(TIME_UNITS.week.seconds / frequency.seconds));
-  const perPayment = weeklyPay / payments;
-
-  return {
-    total: weeklyPay,
-    payMode,
-    hourlyPay,
-    hoursPerWeek,
-    weeklyPay,
-    payments,
-    perPayment,
-    totalPerPayment: perPayment,
-    weeklyEquivalent: weeklyPay,
-    frequencyLabel: frequency.label,
-    frequencySeconds: frequency.seconds,
-  };
-};
-
-const getFrequencyMs = (person) => (TIME_UNITS[person.frequency] || TIME_UNITS.minute).seconds * 1000;
 
 const addHistoryItem = (setter, item) => {
   setter((current) => [
