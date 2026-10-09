@@ -18,7 +18,8 @@ function createWindow() {
     minWidth: 960,
     minHeight: 640,
     title: "Cadence",
-    backgroundColor: "#F6F1E6",
+    backgroundColor: "#0B1026",
+    icon: path.join(__dirname, "..", "src", "brand", "app-icon.png"),
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
