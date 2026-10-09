@@ -2,8 +2,21 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Client, ECDSA, Wallet } from "xrpl";
 import { theme } from "./brand/tokens.js";
 import { CadenceLockup, CadenceMark } from "./brand/CadenceMark.jsx";
-import { RLUSD_CURRENCY, RLUSD_ISSUER, CADENCE_EMPLOYER_WALLET, SOURCE_TAG } from "./domain/xrpl-constants.js";
+import { RLUSD_CURRENCY, RLUSD_ISSUER, SOURCE_TAG } from "./domain/xrpl-constants.js";
 import { TIME_UNITS, FREQUENCIES, getSchedule, getFrequencyMs } from "./domain/schedule.js";
+import { installmentId as makeInstallmentId } from "./domain/paymentOutcome.js";
+import { normalizeSubmitOutcome } from "./services/normalizeOutcome.js";
+import {
+  buildIncomeProofCsv,
+  buildIncomeProofStats,
+  findPayerMismatch,
+  planInstallmentAction,
+  resolvePayerForWallet,
+  selectExcludedXrpEntries,
+  selectIncomeRows,
+  stampPlanPayer,
+} from "./domain/incomeProof";
+import { createAttempt, getActiveAttempt, updateAttempt } from "./storage/attemptStore.js";
 import { getXrplConnect } from "./services/wallet-connection.js";
 import { submitRlusdPayment, submitXrplConnectRlusdPayment } from "./services/payments.js";
 
@@ -82,30 +95,6 @@ const xrplRequest = (request) =>
     });
   });
 
-const rippleTimeToIso = (seconds) =>
-  seconds ? new Date((seconds + 946684800) * 1000).toISOString() : new Date().toISOString();
-
-const txJson = (entry) => entry.tx_json || entry.tx || {};
-
-const deliveredIssuedAmount = (entry) => {
-  const delivered = entry.meta?.delivered_amount;
-  if (delivered && typeof delivered === "object") return delivered;
-  const amount = txJson(entry).Amount || txJson(entry).DeliverMax;
-  return amount && typeof amount === "object" ? amount : null;
-};
-
-const deliveredXrp = (entry) => {
-  const delivered = entry.meta?.delivered_amount;
-  if (typeof delivered === "string") return Number(delivered) / 1000000;
-  const amount = txJson(entry).Amount || txJson(entry).DeliverMax;
-  return typeof amount === "string" ? Number(amount) / 1000000 : 0;
-};
-
-const isRlusdAmount = (amount) =>
-  amount &&
-  (amount.currency === "RLUSD" || amount.currency === RLUSD_CURRENCY) &&
-  amount.issuer === RLUSD_ISSUER;
-
 const isAccountNotFoundError = (error) =>
   /actnotfound|account not found/i.test(error?.message || String(error));
 
@@ -129,9 +118,12 @@ const emptyIncomeProofData = (employeeWallet, employerWallet) => ({
   },
 });
 
-const readIncomeProofData = async (employeeWallet, employerWallet = CADENCE_EMPLOYER_WALLET) => {
+const readIncomeProofData = async (employeeWallet, payerWallet) => {
   if (!employeeWallet?.startsWith("r")) {
     throw new Error("Enter or unlock a valid employee XRPL wallet first.");
+  }
+  if (!payerWallet?.startsWith("r")) {
+    throw new Error("Resolve a payer wallet for this worker before reading income proof.");
   }
 
   let marker;
@@ -160,68 +152,18 @@ const readIncomeProofData = async (employeeWallet, employerWallet = CADENCE_EMPL
     if (!marker) break;
   }
 
-  const incomeRows = transactions
-    .filter((entry) => {
-      const tx = txJson(entry);
-      const amount = deliveredIssuedAmount(entry);
-      return (
-        entry.meta?.TransactionResult === "tesSUCCESS" &&
-        tx.TransactionType === "Payment" &&
-        tx.Account === employerWallet &&
-        tx.Destination === employeeWallet &&
-        Number(tx.SourceTag) === SOURCE_TAG &&
-        isRlusdAmount(amount)
-      );
-    })
-    .map((entry) => {
-      const tx = txJson(entry);
-      const amount = deliveredIssuedAmount(entry);
-      const iso = entry.close_time_iso || rippleTimeToIso(tx.date);
-      return {
-        time: new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-        iso,
-        amount: Number(amount.value || 0),
-        hash: entry.hash,
-        ledgerIndex: entry.ledger_index || tx.ledger_index,
-      };
-    });
-
-  const excludedXrpRows = transactions.filter((entry) => {
-    const tx = txJson(entry);
-    return (
-      entry.meta?.TransactionResult === "tesSUCCESS" &&
-      tx.TransactionType === "Payment" &&
-      tx.Destination === employeeWallet &&
-      !deliveredIssuedAmount(entry) &&
-      deliveredXrp(entry) > 0
-    );
-  });
-
-  const totalRlusd = incomeRows.reduce((sum, row) => sum + row.amount, 0);
-  const totalExcludedXrp = excludedXrpRows.reduce((sum, entry) => sum + deliveredXrp(entry), 0);
-  const newest = incomeRows[0] ? new Date(incomeRows[0].iso).getTime() : Date.now();
-  const oldest = incomeRows[incomeRows.length - 1] ? new Date(incomeRows[incomeRows.length - 1].iso).getTime() : newest;
-  const observedDays = Math.max(1 / 24, (newest - oldest) / 86400000);
-  const dailyRate = totalRlusd / observedDays;
+  const incomeRows = selectIncomeRows(transactions, { payer: payerWallet, destination: employeeWallet });
+  const excludedXrpEntries = selectExcludedXrpEntries(transactions, employeeWallet);
+  const stats = buildIncomeProofStats({ incomeRows, excludedXrpEntries, markerRemaining: Boolean(marker) });
 
   return {
     employeeWallet,
-    employerWallet,
+    employerWallet: payerWallet,
     sourceTag: SOURCE_TAG,
     markerRemaining: Boolean(marker),
     fetchedCount: transactions.length,
     incomeRows,
-    stats: {
-      incomeCount: incomeRows.length,
-      totalRlusd,
-      excludedCount: excludedXrpRows.length,
-      totalExcludedXrp,
-      projectedWeekly: dailyRate * 7,
-      projectedMonthly: dailyRate * 30,
-      projectedAnnual: dailyRate * 365,
-      lifetimeMatches: marker ? `${incomeRows.length}+` : incomeRows.length,
-      observedDays,
-    },
+    stats,
   };
 };
 
@@ -614,7 +556,7 @@ function PersonDetails({ person, onEdit, onToggle, onPay, walletReady, paymentMe
       <div className="details-top"><div className="large-avatar">{person.name.slice(0, 1).toUpperCase()}</div><div><p className="eyebrow">Selected person</p><h2>{person.name}</h2><p className="muted-line">{person.role || "No role added"} {person.email ? ` ${person.email}` : ""}</p></div><button className="text-button edit-button" onClick={onEdit}>Edit</button></div>
       <div className="address-line"><span>Destination</span><code>{shortAddress(person.address)}</code></div>
       <div className="detail-highlight"><div><span className="eyebrow">Weekly pay</span><strong>{money(schedule.weeklyPay)}</strong><small>recipient amount across 1 week</small></div><div className="highlight-arrow">{">"}</div><div><span className="eyebrow">Each payout</span><strong>{money(schedule.perPayment, 6)}</strong><small>sent directly to the destination wallet</small></div></div>
-      <div className="plan-meter"><div><span>Installments sent</span><strong>{paidCount} / {schedule.payments.toLocaleString()}</strong></div><div><span>Next send</span><strong>{nextRun}</strong></div><div><span>Recipient debit</span><strong>{money(schedule.totalPerPayment, 6)}</strong></div><div><span>Source tag</span><strong>{SOURCE_TAG}</strong></div></div>
+      <div className="plan-meter"><div><span>Installments sent</span><strong>{paidCount} / {schedule.payments.toLocaleString()}</strong></div><div><span>Next send</span><strong>{nextRun}</strong></div><div><span>Recipient debit</span><strong>{money(schedule.totalPerPayment, 6)}</strong></div><div><span>Source tag</span><strong>{SOURCE_TAG}</strong></div><div><span>Payer</span><strong>{person.payer ? shortAddress(person.payer) : "Not attached"}</strong></div></div>
       <div className="details-actions"><Button kind={person.active ? "secondary" : "primary"} onClick={onToggle}>{person.active ? "Pause plan" : "Start plan"}</Button><Button kind="secondary" onClick={onPay} disabled={!walletReady || !person.address.startsWith("r")}>Pay one installment</Button></div>
       {!walletReady && <p className="inline-note">Connect a wallet first to make an on-chain payment.</p>}
       {walletReady && !person.address.startsWith("r") && <p className="inline-note">Add a public XRPL destination address before paying.</p>}
@@ -624,13 +566,15 @@ function PersonDetails({ person, onEdit, onToggle, onPay, walletReady, paymentMe
   );
 }
 
-function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onReset }) {
+function IncomeVerification({ walletAddress, employee, people, onBack, onExportLogs, onReset }) {
   const [ledgerOpen, setLedgerOpen] = useState(false);
   const [proofData, setProofData] = useState(null);
   const [proofLoading, setProofLoading] = useState(false);
   const [proofError, setProofError] = useState("");
   const connectedWallet = walletAddress?.startsWith("r") ? walletAddress : "";
-  const employerWallet = CADENCE_EMPLOYER_WALLET;
+  const resolution = useMemo(() => resolvePayerForWallet(connectedWallet, people), [connectedWallet, people]);
+  const employerWallet = proofData?.employerWallet || resolution.payer;
+  const payerSource = proofData?.payerSource || resolution.source;
   const stats = proofData?.stats || {
     incomeCount: 0,
     totalRlusd: 0,
@@ -650,8 +594,8 @@ function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onR
     setProofLoading(true);
     setProofError("");
     try {
-      const data = await readIncomeProofData(connectedWallet, employerWallet);
-      setProofData(data);
+      const data = await readIncomeProofData(connectedWallet, resolution.payer);
+      setProofData({ ...data, payerSource: resolution.source });
     } catch (error) {
       setProofError(error?.message || "Could not read income transactions from the XRP Ledger.");
     } finally {
@@ -662,11 +606,10 @@ function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onR
   useEffect(() => {
     setProofData(null);
     refreshProof();
-  }, [connectedWallet]);
+  }, [connectedWallet, resolution.payer]);
 
   const downloadCsv = () => {
-    const lines = ["time,amount_rlusd,tx_hash,ledger_index", ...incomeRows.map((row) => `${row.iso},${row.amount.toFixed(6)},${row.hash},${row.ledgerIndex || ""}`)];
-    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const blob = new Blob([buildIncomeProofCsv(incomeRows)], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -706,7 +649,13 @@ function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onR
           </div>
           <div className="proof-reference-grid">
             <div><small>Connected wallet / payee</small><b>{connectedWallet || "No wallet connected"}</b></div>
-            <div><small>Payer (employer wallet)</small><b>{employerWallet}</b></div>
+            <div>
+              <small>Payer</small>
+              <b>{employerWallet}</b>
+              <span className={`payer-source-badge ${payerSource === "plan" ? "payer-source-plan" : "payer-source-demo"}`}>
+                {payerSource === "plan" ? "Payer from plan" : "Cadence demo payer"}
+              </span>
+            </div>
             <div><small>Source tag</small><b>{SOURCE_TAG}</b></div>
             <div><small>Ledger</small><b>XRP Ledger - Mainnet</b></div>
           </div>
@@ -743,12 +692,14 @@ function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onR
           {ledgerOpen && (
             <div className="employee-table-wrap">
               <table className="employee-table">
-                <thead><tr><th>Time</th><th>Amount</th><th>Transaction</th><th>Verify</th></tr></thead>
+                <thead><tr><th>Time</th><th>Amount</th><th>Payer</th><th>Result</th><th>Transaction</th><th>Verify</th></tr></thead>
                 <tbody>
                   {incomeRows.map((row, index) => (
                     <tr key={`${row.hash}-${row.ledgerIndex || index}`}>
                       <td>{row.time}</td>
                       <td>${row.amount.toFixed(6)}</td>
+                      <td>{shortAddress(row.payer)}</td>
+                      <td>{row.result}</td>
                       <td>{row.hash.slice(0, 10)}...{row.hash.slice(-6)}</td>
                       <td><a href={`https://xrpscan.com/tx/${row.hash}`} target="_blank" rel="noreferrer">xrpscan</a></td>
                     </tr>
@@ -767,6 +718,7 @@ function IncomeVerification({ walletAddress, employee, onBack, onExportLogs, onR
 
 function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefreshBalance, people, onBack, onExportLogs, onReset }) {
   const connectedWallet = walletAddress?.startsWith("r") ? walletAddress : "";
+  const resolution = useMemo(() => resolvePayerForWallet(connectedWallet, people), [connectedWallet, people]);
   const samplePerson = {
     name: "Connected wallet",
     role: "Employee",
@@ -799,8 +751,8 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
       setEmployeeProofError("");
       setEmployeeProofData(null);
       try {
-        const data = await readIncomeProofData(connectedWallet, CADENCE_EMPLOYER_WALLET);
-        if (!cancelled) setEmployeeProofData(data);
+        const data = await readIncomeProofData(connectedWallet, resolution.payer);
+        if (!cancelled) setEmployeeProofData({ ...data, payerSource: resolution.source });
       } catch (error) {
         if (!cancelled) setEmployeeProofError(error?.message || "Could not read employee wallet transactions.");
       } finally {
@@ -812,7 +764,7 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
     return () => {
       cancelled = true;
     };
-  }, [connectedWallet]);
+  }, [connectedWallet, resolution.payer]);
 
   const incomeRows = employeeProofData?.incomeRows || [];
   const newestPayment = incomeRows[0] || null;
@@ -825,10 +777,10 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
   const displayBalance = money(rlusdBalance, 2);
   const [balanceWhole, balanceCents = "00"] = displayBalance.replace("$", "").split(".");
   const employeeName = employee.name || "Connected wallet";
-  const employerWallet = "rEfcBKr...DE864";
+  const paidByPayer = employeeProofData?.employerWallet || resolution.payer;
 
   if (employeeView === "proof") {
-    return <IncomeVerification walletAddress={walletAddress} employee={employee} onBack={() => setEmployeeView("dashboard")} onExportLogs={onExportLogs} onReset={onReset} />;
+    return <IncomeVerification walletAddress={walletAddress} employee={employee} people={people} onBack={() => setEmployeeView("dashboard")} onExportLogs={onExportLogs} onReset={onReset} />;
   }
 
   return (
@@ -884,7 +836,7 @@ function EmployeeDashboard({ walletAddress, rlusdBalance, balanceLoading, onRefr
             <span>{newestPayment ? newestPayment.time : employeeProofError || "No Cadence-tagged RLUSD payment found"}</span>
             <div className="employee-meta-row">
               <div><small>Source tag</small><b>{SOURCE_TAG}</b></div>
-              <div><small>Paid by</small><b>{employerWallet}</b></div>
+              <div><small>Paid by</small><b>{shortAddress(paidByPayer)}</b></div>
             </div>
           </section>
         </div>
@@ -1162,7 +1114,7 @@ export default function CadenceDashboard() {
   };
 
   const savePerson = (draft) => {
-    const next = { ...draft, payMode: draft.payMode || "weekly", weeklyPay: draft.weeklyPay ?? draft.amount ?? "16", hourlyPay: draft.hourlyPay ?? "20", hoursPerWeek: draft.hoursPerWeek ?? "40", id: draft.id || `person-${Date.now()}`, paidCount: draft.paidCount || 0, nextRunAt: draft.nextRunAt || null };
+    const next = { ...stampPlanPayer(draft, walletAddress), payMode: draft.payMode || "weekly", weeklyPay: draft.weeklyPay ?? draft.amount ?? "16", hourlyPay: draft.hourlyPay ?? "20", hoursPerWeek: draft.hoursPerWeek ?? "40", id: draft.id || `person-${Date.now()}`, paidCount: draft.paidCount || 0, nextRunAt: draft.nextRunAt || null };
     const schedule = getSchedule(next);
     setPeople((current) => draft.id ? current.map((person) => person.id === draft.id ? next : person) : [...current, next]);
     setSelectedId(next.id);
@@ -1174,6 +1126,7 @@ export default function CadenceDashboard() {
       id: next.id,
       name: next.name,
       address: next.address ? shortAddress(next.address) : "none",
+      payer: next.payer ? shortAddress(next.payer) : "none",
       payMode: next.payMode,
       weeklyPay: schedule.weeklyPay,
       perPayment: schedule.perPayment,
@@ -1191,6 +1144,17 @@ export default function CadenceDashboard() {
       setPaymentMessage(`${person.name}'s plan is paused.`);
       addHistoryItem(setHistory, { status: "paused", title: "Plan paused", detail: person.name });
       logEvent("plan.paused", { id: person.id, name: person.name });
+      return;
+    }
+
+    const payerMismatch = findPayerMismatch(person, walletAddress);
+    if (payerMismatch) {
+      // Starting a payer-bound plan from a different wallet is blocked before any
+      // transaction is queued — fresh authorization from the stored payer is required.
+      setPeople((current) => current.map((item) => item.id === id ? { ...item, active: false, nextRunAt: null } : item));
+      setPaymentMessage(`${person.name}'s plan is authorized for payer ${shortAddress(payerMismatch.expectedPayer)}, but a different wallet is connected. Reconnect the payer wallet to resume — fresh authorization is required.`);
+      addHistoryItem(setHistory, { status: "paused", title: "Payer mismatch", detail: `${person.name} - expected ${shortAddress(payerMismatch.expectedPayer)}, connected ${payerMismatch.connectedPayer ? shortAddress(payerMismatch.connectedPayer) : "none"}` });
+      logEvent("payment.blocked.payer_mismatch", { personId: person.id, name: person.name, expected: shortAddress(payerMismatch.expectedPayer), connected: payerMismatch.connectedPayer ? shortAddress(payerMismatch.connectedPayer) : "none", source: "plan_start" });
       return;
     }
 
@@ -1231,7 +1195,24 @@ export default function CadenceDashboard() {
       return;
     }
 
-    if (!(walletProvider === "xrplconnect" || signingWallet) || !person.address?.startsWith("r")) {
+    // Payer guard (payment-safety rule): decide everything BEFORE any attempt
+    // record or transaction exists — a payer-bound plan must never be paid from
+    // another wallet, and a mismatch never leaves an attempt behind.
+    const decision = planInstallmentAction(person, {
+      connectedWallet: walletAddress,
+      hasSigningWallet: Boolean(walletProvider === "xrplconnect" || signingWallet),
+      paidCount,
+      plannedPayments: schedule.payments,
+    });
+
+    if (decision.action === "payer_mismatch") {
+      setPeople((current) => current.map((item) => item.id === person.id ? { ...item, active: false, nextRunAt: null } : item));
+      setPaymentMessage(`${person.name}'s plan is authorized for payer ${shortAddress(decision.expectedPayer)}, but a different wallet is connected. Reconnect the payer wallet to resume — fresh authorization is required.`);
+      addHistoryItem(setHistory, { status: "paused", title: "Payer mismatch", detail: `${person.name} - expected ${shortAddress(decision.expectedPayer)}, connected ${decision.connectedPayer ? shortAddress(decision.connectedPayer) : "none"}` });
+      logEvent("payment.blocked.payer_mismatch", { personId: person.id, name: person.name, expected: shortAddress(decision.expectedPayer), connected: decision.connectedPayer ? shortAddress(decision.connectedPayer) : "none", source });
+      return;
+    }
+    if (decision.action === "missing_wallet_or_destination") {
       setPaymentMessage(`${person.name} needs a connected wallet and destination address.`);
       addHistoryItem(setHistory, { status: "waiting", title: "Payment waiting", detail: `${person.name} needs a connected wallet and destination address.` });
       logEvent("payment.installment.blocked", {
@@ -1239,6 +1220,43 @@ export default function CadenceDashboard() {
         hasSigningWallet: Boolean(walletProvider === "xrplconnect" || signingWallet),
         hasDestination: Boolean(person.address?.startsWith("r")),
       });
+      return;
+    }
+    if (decision.action !== "proceed") return; // plan_complete is handled above
+
+    // Outcome-machine integration: open the durable attempt for this installment
+    // (sequence = paidCount at dispatch) before anything is built or prompted. The
+    // pre-check gives an accurate lock message; createAttempt still enforces the
+    // real one-active-attempt lock at the data layer, so a race cannot pay twice.
+    const sequence = paidCount;
+    const activeAttempt = getActiveAttempt(makeInstallmentId(person.id, sequence));
+    if (activeAttempt) {
+      logEvent("payment.blocked.attempt_active", { personId: person.id, name: person.name, sequence, attemptId: activeAttempt.id, attemptState: activeAttempt.state });
+      if (source === "manual") {
+        setPaymentMessage(`${person.name}'s installment is already in flight — wait for the active attempt to resolve before retrying.`);
+        addHistoryItem(setHistory, { status: "waiting", title: "Installment locked", detail: `${person.name} - installment ${person.id}:${sequence} already has an active attempt (${activeAttempt.state}).` });
+      }
+      return;
+    }
+    let attempt;
+    try {
+      attempt = updateAttempt(createAttempt({
+        planId: person.id,
+        sequence,
+        source,
+        payer: walletAddress,
+        destination: person.address,
+        amount: schedule.perPayment,
+        currency: "RLUSD",
+        issuer: RLUSD_ISSUER,
+        sourceTag: SOURCE_TAG,
+      }).id, "awaiting_signature");
+    } catch (storeError) {
+      // Fail closed: an installment is never paid without a durable attempt
+      // record — an untracked payment is how double-pays happen.
+      logEvent("payment.attempt.store_failed", { personId: person.id, name: person.name, sequence, error: safeLogPayload(storeError) });
+      setPaymentMessage("Cadence could not record the installment attempt before paying, so the payment was blocked. Try again.");
+      addHistoryItem(setHistory, { status: "failed", title: "Attempt not recorded", detail: `${person.name} - installment ${person.id}:${sequence} was blocked before any transaction was built.` });
       return;
     }
 
@@ -1266,6 +1284,28 @@ export default function CadenceDashboard() {
       });
       const tx = result?.result || result || {};
       const txHash = hash || tx.hash;
+      // Record the observed outcome on the durable attempt through the canonical
+      // submit-outcome normalizer (PR 15): a readable ledger verdict classifies
+      // immediately, a hash without a verdict holds at submitted for hash
+      // reconciliation, and neither proves nothing — unresolved, never success.
+      // Bookkeeping failure is logged, never allowed to mask the payment result.
+      try {
+        const outcome = normalizeSubmitOutcome({ result, hash });
+        const hashPatch = outcome.hash ? { hash: outcome.hash } : {};
+        if (outcome.ledgerResult === "tesSUCCESS") {
+          updateAttempt(attempt.id, "submitted", hashPatch);
+          updateAttempt(attempt.id, "validated_success", { ledgerResult: outcome.ledgerResult });
+        } else if (outcome.ledgerResult && /^te[cflm]/.test(outcome.ledgerResult)) {
+          updateAttempt(attempt.id, "submitted", hashPatch);
+          updateAttempt(attempt.id, "validated_failure", { ledgerResult: outcome.ledgerResult });
+        } else if (outcome.hash) {
+          updateAttempt(attempt.id, "submitted", hashPatch);
+        } else {
+          updateAttempt(attempt.id, "unresolved");
+        }
+      } catch (storeError) {
+        logEvent("payment.attempt.record_failed", { attemptId: attempt.id, error: safeLogPayload(storeError) });
+      }
       const nextPaidCount = paidCount + 1;
       const complete = nextPaidCount >= schedule.payments;
       setPeople((current) => current.map((item) => item.id === person.id ? {
@@ -1285,6 +1325,14 @@ export default function CadenceDashboard() {
         nextRunAt: complete ? null : Date.now() + getFrequencyMs(person),
       });
     } catch (error) {
+      try {
+        // No hash reached the caller: per the machine's transition table a
+        // pre-submission failure is validated_failure — terminal but retry-safe,
+        // so the installment may number a fresh attempt on the next dispatch.
+        updateAttempt(attempt.id, "validated_failure", { errorClass: /reject|cancel/i.test(error?.message || "") ? "sign_rejected" : "network" });
+      } catch (storeError) {
+        logEvent("payment.attempt.record_failed", { attemptId: attempt.id, error: safeLogPayload(storeError) });
+      }
       setPaymentMessage(error?.message || "Payment was not submitted.");
       setPeople((current) => current.map((item) => item.id === person.id ? { ...item, nextRunAt: Date.now() + 60000 } : item));
       addHistoryItem(setHistory, { status: "failed", title: "Payment not submitted", detail: `${person.name} - ${error?.message || "Wallet confirmation was cancelled."}` });
@@ -1591,6 +1639,9 @@ export default function CadenceDashboard() {
         .proof-reference-top i { width: 6px; height: 6px; border-radius: 999px; background: ${theme.success}; }
         .proof-reference-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 28px; }
         .proof-reference b { display: block; margin-top: 4px; font-size: 13px; word-break: break-all; }
+        .payer-source-badge { display: inline-flex; align-items: center; margin-top: 7px; padding: 3px 9px; border-radius: 999px; font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+        .payer-source-badge.payer-source-plan { background: rgba(33,212,194,.16); color: ${theme.success}; }
+        .payer-source-badge.payer-source-demo { background: ${theme.dangerSoft}; color: ${theme.danger}; }
         .proof-stat-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
         .proof-card { padding: 20px 14px; border-radius: 28px; background: ${theme.bgRaised}; border: 1px solid ${theme.hairline}; box-shadow: 0 4px 14px rgba(0,0,0,.3); }
         .proof-card .eyebrow { color: color-mix(in srgb, ${theme.accent} 75%, ${theme.textPrimary}); }
