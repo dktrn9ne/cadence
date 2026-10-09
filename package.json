@@ -8,7 +8,8 @@
     "desktop:dev": "node electron/dev-runner.cjs",
     "desktop": "npm run build && electron electron/main.cjs",
     "build": "vite build",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "vitest run"
   },
   "dependencies": {
     "@crossmarkio/sdk": "^0.4.0",
@@ -21,6 +22,9 @@
     "xrpl": "^5.0.0"
   },
   "devDependencies": {
-    "electron": "^39.2.6"
+    "@testing-library/react": "^16.3.3",
+    "electron": "^39.2.6",
+    "jsdom": "^29.1.1",
+    "vitest": "^3.2.7"
   }
 }
