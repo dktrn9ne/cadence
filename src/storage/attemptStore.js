@@ -191,3 +191,11 @@ export function getActiveAttempt(targetInstallmentId) {
     ) ?? null
   );
 }
+
+// Read-only enumeration for the reconciliation pass (PR 03 wiring): expire
+// stale no-hash active records and reconcile hashed unresolved ones. Returns
+// every record; callers filter by state/hash — the store stays the only
+// writer of the storage key.
+export function listAttempts() {
+  return readAll();
+}
