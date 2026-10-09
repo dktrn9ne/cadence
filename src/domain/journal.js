@@ -12,8 +12,7 @@
 // Nothing here submits, retries, or touches the ledger. Active-attempt lookup
 // and the prune policy are the safety core: a prune may never drop an entry
 // that keeps an attempt active or unresolved.
-import { installmentId as makeInstallmentId } from "./paymentOutcome.js";
-import { OUTCOME_LABELS } from "./installments.js";
+import { OUTCOME_LABELS, installmentIdFor } from "./installments.js";
 
 export const JOURNAL_ENTRY_TYPES = Object.freeze([
   "attempt_started",
@@ -92,7 +91,7 @@ export function appendEntry(journal, journalSeq, entryFields) {
 }
 
 export function attemptStartedEntry({ journal, journalSeq, plan, sequence, amount, destination, payerAddress, source }) {
-  const installmentId = makeInstallmentId(plan.id, sequence);
+  const installmentId = installmentIdFor(plan.id, sequence);
   const base = appendEntry(journal, journalSeq, {
     type: "attempt_started",
     status: ATTEMPT_STARTED_STATUS,
@@ -118,7 +117,7 @@ export function attemptOutcomeEntry({ journal, journalSeq, startedEntry, status,
 export function dispatchRefusedEntry({ journal, journalSeq, plan, sequence, reason, detail }) {
   const installmentId = sequence === undefined || sequence === null
     ? plan.id
-    : makeInstallmentId(plan.id, sequence);
+    : installmentIdFor(plan.id, sequence);
   return appendEntry(journal, journalSeq, {
     type: "dispatch_refused",
     status: "refused",

@@ -31,7 +31,8 @@ export const LOAD_STATUSES = Object.freeze([
 
 // Named fields only. payerAddress is the connected PUBLIC account that
 // authorized the plan — public data, and what later lanes check a wallet
-// change against.
+// change against. "payer" is the same pin under the name the dashboard's
+// stampPlanPayer writes; both are accepted so either source survives.
 export const PLAN_FIELDS = Object.freeze([
   "id",
   "name",
@@ -39,6 +40,7 @@ export const PLAN_FIELDS = Object.freeze([
   "email",
   "address",
   "payerAddress",
+  "payer",
   "weeklyPay",
   "payMode",
   "hourlyPay",
@@ -160,6 +162,9 @@ export function validatePlanRow(plan) {
   }
   if (plan.payerAddress !== undefined && (typeof plan.payerAddress !== "string" || plan.payerAddress.trim() === "")) {
     return '"payerAddress" must be a non-empty string when present';
+  }
+  if (plan.payer !== undefined && (typeof plan.payer !== "string" || plan.payer.trim() === "")) {
+    return '"payer" must be a non-empty string when present';
   }
   for (const field of ["weeklyPay", "hourlyPay", "hoursPerWeek"]) {
     const value = plan[field];

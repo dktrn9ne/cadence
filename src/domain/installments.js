@@ -7,8 +7,6 @@
 // a hash plus a readable ledger result. It never guesses: a hash whose
 // ledger result cannot be read is `unresolved` (needs a hash lookup before
 // any retry), and a dispatch that never produced a hash is `failed_no_hash`.
-import { installmentId as makeInstallmentId } from "./paymentOutcome.js";
-
 // The journal's terminal labels for one attempt. Only validated_success
 // corresponds to a paid installment; relabeling paidCount to honor that is
 // the validation lane's change, not this PR's.
@@ -27,9 +25,10 @@ export const TES_SUCCESS = "tesSUCCESS";
 // overdue schedules re-enter through this grace window.
 export const OVERDUE_GRACE_MS = 60_000;
 
-// Deterministic installment identity: `${planId}:${sequence}`. Single source
-// of the format is the outcome machine (paymentOutcome.js).
-export const installmentIdFor = makeInstallmentId;
+// Deterministic installment identity: `${planId}:${sequence}`. This module is
+// the single source of the format — every dispatch path, journal entry, and
+// recovery lookup derives the id from here.
+export const installmentIdFor = (planId, sequence) => `${planId}:${sequence}`;
 
 // classifyOutcome({ hash, ledgerResult }) — the only labeling of submit
 // results in the codebase.
@@ -81,7 +80,9 @@ export const PAYER_MATCH = Object.freeze({
 });
 
 export function payerMatchesPlan(plan, connectedAddress) {
-  const pinned = plan?.payerAddress;
+  // "payer" is the pin the dashboard's stampPlanPayer writes; payerAddress is
+  // the spec's name for the same data. Either one binds the plan.
+  const pinned = plan?.payerAddress ?? plan?.payer;
   if (typeof pinned !== "string" || pinned.trim() === "") {
     return PAYER_MATCH.UNPINNED;
   }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Client, ECDSA, Wallet } from "xrpl";
 import { theme } from "./brand/tokens.js";
 import { CadenceLockup, CadenceMark } from "./brand/CadenceMark.jsx";
@@ -9,6 +9,13 @@ import { flushPlans, loadPlans, savePlans } from "./storage/planState.js";
 import { dispatchBlockReason, installmentId } from "./domain/installment.js";
 import { countMissedWindows, hydrateRestoredPlans, mountAttemptAction } from "./domain/recovery.js";
 import { OUTCOMES, lookupTransaction } from "./services/xrplLedger.js";
+import {
+  attemptOutcomeEntry,
+  attemptStartedEntry,
+  dispatchRefusedEntry,
+  findActiveAttempt,
+} from "./domain/journal.js";
+import { useDurablePayments } from "./storage/useDurablePayments.js";
 import {
   buildIncomeProofCsv,
   buildIncomeProofStats,
@@ -281,7 +288,10 @@ const safeLogPayload = (value) => {
 
   return Object.fromEntries(Object.entries(value).map(([key, item]) => {
     const lower = key.toLowerCase();
-    if (lower.includes("seed") || lower.includes("phrase") || lower.includes("secret") || lower.includes("password") || lower.includes("accessinput")) {
+    // The Electron main process mirrors renderer console output to
+    // userData/cadence-renderer.log, so "log-only" redaction is still
+    // persistence — privatekey and mnemonic keys join the log-path list.
+    if (lower.includes("seed") || lower.includes("phrase") || lower.includes("secret") || lower.includes("password") || lower.includes("privatekey") || lower.includes("mnemonic") || lower.includes("accessinput")) {
       return [key, "[redacted]"];
     }
     return [key, safeLogPayload(item)];
@@ -946,6 +956,32 @@ function Dashboard({ walletAddress, walletProvider, rlusdBalance, balanceLoading
   );
 }
 
+// Storage status banner: every non-healthy persistence state is visible.
+// Dispatch halts on write failures and corrupt/unknown data until the user
+// acknowledges; recovery info is dismissable.
+function StorageBanner({ status, onAcknowledge }) {
+  if (!status || status.state === "ready" || status.state === "hydrating") return null;
+  const tones = {
+    recovered: { color: theme.accent2, bg: "rgba(33,212,194,0.12)" },
+    invalid_rows: { color: theme.textPrimary, bg: theme.fillSoft },
+    corrupt: { color: theme.danger, bg: theme.dangerSoft },
+    unknown_version: { color: theme.danger, bg: theme.dangerSoft },
+    write_failed: { color: theme.danger, bg: theme.dangerSoft },
+  };
+  const tone = tones[status.state] || { color: theme.textMuted, bg: theme.fillSoft };
+  const acknowledgeable = status.state !== "write_failed";
+  return (
+    <div role="alert" style={{ position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)", zIndex: 80, display: "flex", alignItems: "center", gap: 12, maxWidth: "min(1180px, calc(100vw - 24px))", padding: "10px 16px", borderRadius: 12, border: `1px solid ${tone.color}55`, background: tone.bg, color: tone.color, font: `500 13px/1.45 ${theme.fontBody}`, boxShadow: "0 8px 24px rgba(0,0,0,0.35)" }}>
+      <span style={{ flex: 1 }}>{status.message}</span>
+      {acknowledgeable && (
+        <button type="button" onClick={onAcknowledge} style={{ padding: "4px 12px", borderRadius: 8, border: `1px solid ${tone.color}`, background: "transparent", color: tone.color, font: `600 12px/1.4 ${theme.fontBody}`, cursor: "pointer" }}>
+          Acknowledge
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function CadenceDashboard() {
   const [screen, setScreen] = useState("intro");
   const [method, setMethod] = useState("mnemonic");
@@ -1008,6 +1044,108 @@ export default function CadenceDashboard() {
   }, []);
 
   const selectedPerson = useMemo(() => people.find((person) => person.id === selectedId), [people, selectedId]);
+
+  // Synchronous mirror of the journal for async dispatch paths (payInstallment
+  // reads and appends across awaits). Every mutation goes through
+  // commitPaymentJournal, so ref and state never diverge.
+  const [paymentJournal, setPaymentJournal] = useState({ entries: [], seq: 0 });
+  const paymentJournalRef = useRef({ entries: [], seq: 0 });
+  const commitPaymentJournal = useCallback((next) => {
+    const journalState = { entries: next.journal, seq: next.journalSeq };
+    paymentJournalRef.current = journalState;
+    setPaymentJournal(journalState);
+  }, []);
+
+  // Appends one entry built by a journal.js builder — those builders return
+  // the full append result { journal, journalSeq, entry }, so the result is
+  // committed as-is (never re-appended).
+  const commitJournalResult = useCallback((result) => {
+    commitPaymentJournal({ journal: result.journal, journalSeq: result.journalSeq });
+    return paymentJournalRef.current;
+  }, [commitPaymentJournal]);
+
+  // Journal translation for the dispatcher door's truth points. The door
+  // reports what happened (attempt accepted before submit, hash captured,
+  // outcome classified, guard refusals); the record layer decides how it is
+  // journaled — spec labels: `attempt_started` strictly before dispatch,
+  // honest outcomes, `failed_no_hash` when no hash exists to reconcile.
+  const handleJournalEvent = useCallback((event) => {
+    if (!event) return;
+    if (event.type === "refused") {
+      commitJournalResult(dispatchRefusedEntry({
+        journal: paymentJournalRef.current.entries,
+        journalSeq: paymentJournalRef.current.seq,
+        plan: event.plan,
+        sequence: event.sequence,
+        reason: event.reason,
+        detail: event.detail,
+      }));
+      return;
+    }
+    if (event.type === "attempt_started") {
+      commitJournalResult(attemptStartedEntry({
+        journal: paymentJournalRef.current.entries,
+        journalSeq: paymentJournalRef.current.seq,
+        plan: event.plan,
+        sequence: event.sequence,
+        amount: event.amount,
+        destination: event.destination,
+        payerAddress: event.payerAddress,
+        source: event.source,
+      }));
+      return;
+    }
+    if (event.type === "attempt_outcome") {
+      // The started entry is the installment's active attempt — the door
+      // serializes per installment, so whatever is active now is the attempt
+      // this outcome belongs to.
+      const startedEntry = findActiveAttempt(paymentJournalRef.current.entries, event.installmentId);
+      if (!startedEntry) {
+        // The door always emits attempt_started before any outcome, so this
+        // means journal state diverged from the dispatch flow — surface it,
+        // never fabricate an attempt number.
+        logEvent("journal.outcome_without_started", {
+          installmentId: event.installmentId,
+          status: event.status,
+        });
+        return;
+      }
+      commitJournalResult(attemptOutcomeEntry({
+        journal: paymentJournalRef.current.entries,
+        journalSeq: paymentJournalRef.current.seq,
+        startedEntry,
+        status: event.status,
+        txHash: event.txHash || undefined,
+        ledgerResult: event.ledgerResult || undefined,
+        error: event.error,
+        reason: event.reason,
+      }));
+    }
+  }, [commitJournalResult]);
+
+  // Hydration seam: the hook loads the durable record document (history +
+  // journal) on mount and hands recovered entries back through here. Plans
+  // hydrate separately and synchronously via planState (PR 04's restore path),
+  // so the record layer never re-writes plan state.
+  const applyHydratedState = useCallback((next) => {
+    setHistory(next.history);
+    commitPaymentJournal({ journal: next.journal, journalSeq: next.journalSeq });
+  }, [commitPaymentJournal]);
+
+  const {
+    hydrated,
+    storageStatus,
+    storageHalted,
+    acknowledgeStorageIssue,
+  } = useDurablePayments({
+    history,
+    journal: paymentJournal.entries,
+    journalSeq: paymentJournal.seq,
+    applyHydratedState,
+  });
+  // The dispatch gate: no payment path — scheduler tick, manual pay, or
+  // plan-start timer — runs before hydration or while storage is halted.
+  const dispatchAllowed = hydrated && !storageHalted;
 
   const logEvent = (event, payload = {}) => {
     const entry = {
@@ -1272,9 +1410,19 @@ export default function CadenceDashboard() {
         : submitter({ wallet: signingWallet, destination: plan.address, amount });
     },
     claims: dispatchClaimsRef.current,
+    // Durable record (PR 02): the door reports each truth point and the
+    // append-only journal below is the payment history's source of truth.
+    onJournalEvent: handleJournalEvent,
   });
 
   const payInstallment = async (person, source = "manual") => {
+    // Dispatch gate — shared by scheduler tick, manual pay, and the plan-start
+    // timer: nothing fires before the record document hydrates or while
+    // storage is halted.
+    if (!dispatchAllowed) {
+      logEvent("payment.installment.blocked", { reason: "storage_not_ready", hydrated, storageHalted });
+      return { dispatched: false, reason: "storage-not-ready" };
+    }
     try {
       const schedule = getSchedule(person);
       const paidCount = Number(person.paidCount || 0);
@@ -1289,7 +1437,6 @@ export default function CadenceDashboard() {
         payer: walletAddress ? shortAddress(walletAddress) : "none",
         destination: person.address ? shortAddress(person.address) : "none",
       });
-
       if (paidCount >= schedule.payments) {
         updatePeople((current) => current.map((item) => item.id === person.id ? { ...item, active: false, nextRunAt: null } : item));
         addHistoryItem(setHistory, { status: "success", title: "Plan complete", detail: `${person.name} has received all planned installments.` });
@@ -1307,6 +1454,16 @@ export default function CadenceDashboard() {
         plannedPayments: schedule.payments,
       });
       if (decision.action === "payer_mismatch") {
+        // The refusal itself is journaled — a plan paused by the payer rule
+        // leaves a durable record of why, per the payment-safety contract.
+        commitJournalResult(dispatchRefusedEntry({
+          journal: paymentJournalRef.current.entries,
+          journalSeq: paymentJournalRef.current.seq,
+          plan: person,
+          sequence: paidCount,
+          reason: "payer_mismatch",
+          detail: `plan pinned to ${shortAddress(decision.expectedPayer)}`,
+        }));
         updatePeople((current) => current.map((item) => item.id === person.id ? { ...item, active: false, nextRunAt: null } : item));
         setPaymentMessage(`${person.name}'s plan is authorized for payer ${shortAddress(decision.expectedPayer)}, but a different wallet is connected. Reconnect the payer wallet to resume — fresh authorization is required.`);
         addHistoryItem(setHistory, { status: "paused", title: "Payer mismatch", detail: `${person.name} - expected ${shortAddress(decision.expectedPayer)}, connected ${decision.connectedPayer ? shortAddress(decision.connectedPayer) : "none"}` });
@@ -1614,6 +1771,9 @@ export default function CadenceDashboard() {
   };
 
   useEffect(() => {
+    // No scheduler ticks before hydration or while storage is halted — the
+    // 10s interval simply never mounts until dispatch is allowed.
+    if (!dispatchAllowed) return undefined;
     const timer = window.setInterval(() => {
       // Every due plan gets its own dispatch; the guarded door serializes per
       // installment (plan A's in-flight payment never blocks plan B's due
@@ -1644,7 +1804,7 @@ export default function CadenceDashboard() {
     }, 10000);
 
     return () => window.clearInterval(timer);
-  }, [people, signingWallet, walletProvider, walletAddress]);
+  }, [people, signingWallet, walletProvider, walletAddress, dispatchAllowed]);
   const resetWallet = () => {
     logEvent("wallet.reset", { previousWallet: walletAddress ? shortAddress(walletAddress) : "none", peopleCount: people.length });
     clearStartTimer();
@@ -1974,6 +2134,7 @@ export default function CadenceDashboard() {
           .pattern-wave svg, .pattern-wave path, .pattern-dots, .stream-live, .stream-wave-line, .stream-wave circle { animation: none; }
         }
       `}</style>
+      <StorageBanner status={storageStatus} onAcknowledge={acknowledgeStorageIssue} />
       {screen === "intro" && <Intro method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} expectedAddress={expectedAddress} setExpectedAddress={setExpectedAddress} onSubmit={finishSetup} error={setupError} isLocal={localDesktop} connectorRef={xrplConnectorRef} xrplManager={xrplConnectManager} />}
       {screen === "dashboard" && (
         <>

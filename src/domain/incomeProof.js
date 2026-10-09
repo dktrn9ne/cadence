@@ -156,9 +156,12 @@ export const stampPlanPayer = (draft, connectedWallet) => ({
 // Payment-safety guard: a plan that carries a payer may only be paid by that payer.
 // Returns null when the connected wallet is authorized, or the mismatch to block on.
 export const findPayerMismatch = (person, connectedWallet) => {
-  if (!person?.payer?.startsWith("r")) return null;
-  if (person.payer === connectedWallet) return null;
-  return { expectedPayer: person.payer, connectedPayer: connectedWallet || null };
+  // Plans may carry the pin under either name: "payer" (this editor) or
+  // "payerAddress" (the durable store's spec field). Either one binds.
+  const pinned = person?.payer ?? person?.payerAddress;
+  if (!pinned?.startsWith("r")) return null;
+  if (pinned === connectedWallet) return null;
+  return { expectedPayer: pinned, connectedPayer: connectedWallet || null };
 };
 
 // Pre-submit decision for one installment, in the order payInstallment applies it.
