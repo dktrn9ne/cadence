@@ -6,8 +6,8 @@ case from the PR 04 scheduler-recovery spec, with the behavior a person should
 observe and the automated test that already pins the core rule in CI.
 
 **Scope:** installment dispatch, plan persistence, mount recovery, hash
-reconciliation. Out of scope here: income proof, wallet onboarding itself, the
-Electron shell.
+reconciliation, and the Electron desktop shell (own section below). Out of scope
+here: income proof and wallet onboarding itself.
 
 ## How to use this matrix
 
@@ -130,6 +130,51 @@ Observed on 2026-10-09 (headless Chromium):
 | `npm run build` | ✅ green (pre-existing chunk-size warnings only), re-run green at the docs head |
 | Headless smoke — opening screen | ✅ zero console errors, zero page errors |
 | Headless smoke — connect screen | ✅ advances to wallet selection, zero page errors; two pre-existing xrpl-connect Xaman-probe console errors noted above (flagged, out of scope) |
+
+## Desktop verification (Electron shell)
+
+The Electron wrapper (`electron/main.cjs`) renders the same UI in a desktop
+window: context-isolated (`contextIsolation: true`, `nodeIntegration: false`),
+loading the built `dist/index.html?desktop=1` (`npm run desktop`) or the Vite dev
+server (`npm run desktop:dev`, wired through `CADENCE_DEV_SERVER_URL` by
+`electron/dev-runner.cjs`). It appends renderer console output and load failures
+to `cadence-renderer.log` in the Electron userData directory (Linux default:
+`~/.config/cadence/`; the "Cadence window created" line prints the exact path).
+
+**System libraries** — Electron needs these on a fresh Linux host (CI runner or
+sandbox) before `npm run desktop` or the headless smoke:
+
+```bash
+sudo apt-get install -y xvfb libcups2 libnss3 libgbm1 libasound2t64 libgtk-3-0t64 \
+  libxtst6 libxss1 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libdrm2
+```
+
+**Headless desktop smoke** — build, launch under a virtual display, and assert on
+the renderer log (window created, no load failure):
+
+```bash
+npm run build
+LOG="$HOME/.config/cadence/cadence-renderer.log"  # userData default on Linux; the window-created line prints the real path
+rm -f "$LOG"
+xvfb-run -a npx electron electron/main.cjs --no-sandbox &  # --no-sandbox: no setuid chrome-sandbox helper in sandboxes/CI
+APP_PID=$!
+sleep 8
+grep -q "Cadence window created" "$LOG" || { echo "FAIL: no window"; exit 1; }
+if grep -q "load failed" "$LOG"; then echo "FAIL: renderer load error"; exit 1; fi
+kill "$APP_PID" 2>/dev/null || true
+pkill -f "electron/main.cjs" 2>/dev/null || true
+echo "Desktop smoke: PASS"
+```
+
+Expected outcomes and boundaries:
+
+| Check | Expected |
+|-------|----------|
+| Window creation | `Cadence window created. Renderer log path: …` appears in the log within a few seconds of launch |
+| Asset load | No `load failed` line — the built-asset run loads `dist/index.html?desktop=1` |
+| Renderer output | Renderer console lines land in the same log with level/source/message |
+| Screenshots | Best-effort only: headless hosts without a compositor may not capture windows — the log assertions are the evidence; record the limitation rather than faking a pass |
+| Full wallet flow | Out of scope headless: connecting and signing need an external XRP wallet (the desktop app imports a mnemonic/family seed at runtime — never in tests, fixtures, or recordings) |
 
 ## Evidence index (latest gate)
 
