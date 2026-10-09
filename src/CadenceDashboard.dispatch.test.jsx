@@ -295,11 +295,14 @@ describe("guarded per-installment dispatch", () => {
       expect.objectContaining({ command: "tx", transaction: HASH }),
     );
 
-    // Manual retry refused while unresolved...
-    fireEvent.click(screen.getByRole("button", { name: "Pay one installment" }));
-    await flushUI(4);
-    expect(submitXrplConnectRlusdPayment).toHaveBeenCalledTimes(1);
-    expect(screen.getAllByText(/reconciled before another attempt/i).length).toBeGreaterThan(0);
+    // Manual retry is impossible while unresolved — and no refusal message is
+    // needed: the pay button is disabled outright, the card shows the
+    // verifying state, and a Reconcile now affordance takes its place. (The
+    // durable "unresolved-attempt" refusal itself stays covered by the
+    // dispatcher's unit tests.)
+    expect(screen.getByRole("button", { name: "Pay one installment" }).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: "Reconcile now" }).disabled).toBe(false);
+    expect(screen.getAllByText(/Verifying installment #1 with the ledger/i).length).toBeGreaterThan(0);
 
     // ...and the scheduler tick is refused by the same durable guard.
     await act(async () => {
