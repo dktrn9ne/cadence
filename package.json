@@ -9,7 +9,7 @@
     "desktop": "npm run build && electron electron/main.cjs",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "vitest"
+    "test": "vitest run"
   },
   "dependencies": {
     "@crossmarkio/sdk": "^0.4.0",
