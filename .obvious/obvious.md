@@ -4,7 +4,10 @@ Repo: **dktrn9ne/cadence** — "Cadence on XRP", a consumer wallet dashboard for
 verification and scheduled XRP Ledger payments. Single-page React app with an optional
 Electron desktop wrapper. Pure frontend: no backend service, no database, no required
 environment variables. External runtime dependency is XRPL mainnet (`wss://s1.ripple.com`),
-contacted only when a user connects a wallet or requests ledger data.
+contacted only when a user connects a wallet or requests ledger data. The editing
+contract every change must honor — test hygiene, secrets rules, frozen XRPL
+constants, the payment-safety contract — is `AGENTS.md` (repo root); verification
+procedures live in `docs/QA.md`.
 
 ## Stack
 
@@ -47,6 +50,8 @@ proof. Dev-server health check: `curl -sf http://127.0.0.1:5173/`.
 | `index.html` | Vite entry HTML |
 | `vite.config.js` | React plugin, `base: "./"`, dev host 127.0.0.1:5173 |
 | `vercel.json` | Vercel build config + SPA rewrite |
+| `AGENTS.md` | Agent contract: install/test hygiene, payment-safety contract, secrets rules, merge discipline |
+| `docs/` | Verification docs: QA matrix + release gate (`docs/QA.md`), docs index |
 | `latest.zip` | Prebuilt downloadable bundle referenced by the README |
 | `streampay-technical-brief.docx` | Product/technical brief document |
 
