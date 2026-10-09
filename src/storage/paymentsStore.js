@@ -1,19 +1,25 @@
-// The durable footprint of Cadence payments: one versioned localStorage
-// document (cadence.payments.v1), one atomic write per change, one checksum
-// over the canonical form (spec art_iD6vSHMR, locked backend decision).
+// The durable record document for Cadence payments: one versioned localStorage
+// key (cadence.payments.v1), one atomic write per change, one checksum over
+// the canonical form (spec art_iD6vSHMR, locked backend decision).
+//
+// Scope on the merged stack: this document is the PAYMENT RECORD — display
+// history and the append-only attempt journal. Plans and their per-installment
+// attempt map live in src/storage/planState.js (cadence-plans-v1, PR 04's
+// single-writer store); this module never writes plan state, so there is
+// exactly one source of truth for plans.
 //
 // Safety model, by construction rather than by redaction luck:
-// - The serializer copies NAMED fields only — an unknown field on a plan is
-//   dropped on save, never persisted, never resurrected.
+// - The serializer copies NAMED fields only — an unknown field is dropped on
+//   save, never persisted, never resurrected.
 // - assertNoSecretMaterial runs on every save and refuses secret-shaped keys
 //   or signed-blob-shaped values anywhere in the document.
 // - load() never throws: unparseable JSON, checksum mismatches, and unknown
 //   schema versions quarantine the raw payload and resolve a status the
-//   caller renders; invalid plan rows are preserved, not scheduled.
+//   caller renders; invalid rows are preserved in invalidEntries, never
+//   silently dropped.
 //
-// This module knows shapes, not payroll semantics — plan meaning lives in
+// This module knows shapes, not payroll semantics — payment meaning lives in
 // the domain modules.
-import { FREQUENCIES } from "../domain/schedule.js";
 import { JOURNAL_ENTRY_TYPES, pruneJournal } from "../domain/journal.js";
 import { OUTCOME_LABELS } from "../domain/installments.js";
 
@@ -27,28 +33,6 @@ export const LOAD_STATUSES = Object.freeze([
   "corrupt",
   "unknown_version",
   "invalid",
-]);
-
-// Named fields only. payerAddress is the connected PUBLIC account that
-// authorized the plan — public data, and what later lanes check a wallet
-// change against. "payer" is the same pin under the name the dashboard's
-// stampPlanPayer writes; both are accepted so either source survives.
-export const PLAN_FIELDS = Object.freeze([
-  "id",
-  "name",
-  "role",
-  "email",
-  "address",
-  "payerAddress",
-  "payer",
-  "weeklyPay",
-  "payMode",
-  "hourlyPay",
-  "hoursPerWeek",
-  "frequency",
-  "active",
-  "paidCount",
-  "nextRunAt",
 ]);
 
 export const HISTORY_FIELDS = Object.freeze(["id", "at", "status", "title", "detail"]);
@@ -138,56 +122,7 @@ export async function checksumOf(value) {
   return `fnv1a-${hash.toString(16).padStart(8, "0")}-${canonical.length}`;
 }
 
-// Whitelist-copy of one plan: unknown fields dropped, undefined fields
-// omitted. Money fields keep their stored string form — the dashboard treats
-// them as strings and the store does not coerce.
-export function copyPlan(plan) {
-  const copy = {};
-  for (const field of PLAN_FIELDS) {
-    if (plan[field] !== undefined) copy[field] = plan[field];
-  }
-  return copy;
-}
-
 const isPlainObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
-
-// Per-plan schema validation for LOAD. Money fields may be strings or
-// numbers (the UI binds them as strings); progress and scheduling must be
-// well-typed or the row is rejected.
-export function validatePlanRow(plan) {
-  if (!isPlainObject(plan)) return "plan must be an object";
-  if (typeof plan.id !== "string" || plan.id.trim() === "") return '"id" must be a non-empty string';
-  for (const field of ["name", "role", "email", "address"]) {
-    if (plan[field] !== undefined && typeof plan[field] !== "string") return `"${field}" must be a string`;
-  }
-  if (plan.payerAddress !== undefined && (typeof plan.payerAddress !== "string" || plan.payerAddress.trim() === "")) {
-    return '"payerAddress" must be a non-empty string when present';
-  }
-  if (plan.payer !== undefined && (typeof plan.payer !== "string" || plan.payer.trim() === "")) {
-    return '"payer" must be a non-empty string when present';
-  }
-  for (const field of ["weeklyPay", "hourlyPay", "hoursPerWeek"]) {
-    const value = plan[field];
-    if (value !== undefined && typeof value !== "string" && typeof value !== "number") {
-      return `"${field}" must be a string or number`;
-    }
-  }
-  if (plan.payMode !== undefined && plan.payMode !== "weekly" && plan.payMode !== "hourly") {
-    return '"payMode" must be "weekly" or "hourly"';
-  }
-  if (plan.frequency !== undefined && !FREQUENCIES.includes(plan.frequency)) {
-    return `"frequency" must be one of ${FREQUENCIES.join(", ")}`;
-  }
-  if (plan.active !== undefined && typeof plan.active !== "boolean") return '"active" must be a boolean';
-  const paidCount = plan.paidCount;
-  if (paidCount !== undefined && (!Number.isInteger(paidCount) || paidCount < 0)) {
-    return '"paidCount" must be a non-negative integer';
-  }
-  if (plan.nextRunAt !== undefined && plan.nextRunAt !== null && !Number.isFinite(Number(plan.nextRunAt))) {
-    return '"nextRunAt" must be epoch millis or null';
-  }
-  return null;
-}
 
 function copyHistoryRow(row) {
   if (!isPlainObject(row)) return null;
@@ -195,7 +130,7 @@ function copyHistoryRow(row) {
   for (const field of HISTORY_FIELDS) {
     if (row[field] !== undefined) copy[field] = row[field];
   }
-  if (typeof copy.id !== "string" || typeof copy.title !== "string") return null;
+  if (typeof copy.id !== "string" || copy.id === "" || typeof copy.title !== "string") return null;
   return copy;
 }
 
@@ -234,7 +169,7 @@ function quarantine(raw, reason, schemaVersion) {
 //   { status: "ok", data }     checksum + schema valid
 //   { status: "corrupt", reason }  unparseable or checksum mismatch (payload quarantined)
 //   { status: "unknown_version", schemaVersion }   future schema, never guessed at
-//   { status: "invalid", data, invalidEntries }    valid doc, some plans rejected
+//   { status: "invalid", data, invalidEntries }    valid doc, some rows rejected
 export async function load() {
   let raw;
   try {
@@ -273,35 +208,41 @@ export async function load() {
     return { status: "corrupt", reason: "checksum_mismatch", quarantine: quarantine(raw, "checksum_mismatch") };
   }
 
-  // Per-plan validation: valid rows schedule, invalid rows are preserved in
+  // Per-row validation: valid rows hydrate, invalid rows are preserved in
   // invalidEntries (never scheduled, never silently dropped).
-  const plans = [];
+  const history = [];
+  const journal = [];
   const invalidEntries = [];
-  for (const row of Array.isArray(payload.plans) ? payload.plans : []) {
-    const reason = validatePlanRow(row);
-    if (reason) {
-      invalidEntries.push({ reason, row });
+  for (const row of Array.isArray(payload.history) ? payload.history : []) {
+    const copy = copyHistoryRow(row);
+    if (copy) {
+      history.push(copy);
     } else {
-      plans.push(copyPlan(row));
+      invalidEntries.push({ reason: "invalid_history_row", row });
     }
   }
+  // Stored order is preserved — newest-first, exactly as the dashboard
+  // renders it (addHistoryItem prepends).
+  const cappedHistory = history.slice(0, HISTORY_CAP);
+  if (history.length > cappedHistory.length) {
+    invalidEntries.push({ reason: "history_overflow", row: { dropped: history.length - cappedHistory.length } });
+  }
 
-  const history = (Array.isArray(payload.history) ? payload.history : [])
-    .map(copyHistoryRow)
-    .filter(Boolean)
-    .slice(0, HISTORY_CAP);
-
-  const journal = (Array.isArray(payload.journal) ? payload.journal : [])
-    .map(copyJournalEntry)
-    .filter(Boolean);
+  for (const row of Array.isArray(payload.journal) ? payload.journal : []) {
+    const copy = copyJournalEntry(row);
+    if (copy) {
+      journal.push(copy);
+    } else {
+      invalidEntries.push({ reason: "invalid_journal_entry", row });
+    }
+  }
   // The seq counter never regresses below the highest stored seq.
   const journalSeq = journal.reduce((max, entry) => Math.max(max, entry.seq), 0);
 
   return {
     status: invalidEntries.length > 0 ? "invalid" : "ok",
     data: {
-      plans,
-      history,
+      history: cappedHistory,
       journal,
       journalSeq: Math.max(Number.isInteger(payload.journalSeq) ? payload.journalSeq : 0, journalSeq),
       savedAt: typeof payload.savedAt === "string" ? payload.savedAt : null,
@@ -315,7 +256,8 @@ export async function load() {
 // the caller halts dispatch and shows the banner; it never throws past the
 // hook.
 export async function save(doc) {
-  const plans = (Array.isArray(doc?.plans) ? doc.plans : []).map(copyPlan);
+  // History arrays are newest-first (addHistoryItem prepends); the cap keeps
+  // the newest rows.
   const history = (Array.isArray(doc?.history) ? doc.history : [])
     .map(copyHistoryRow)
     .filter(Boolean)
@@ -325,7 +267,6 @@ export async function save(doc) {
   );
 
   const payload = {
-    plans,
     history,
     journal,
     journalSeq: journal.reduce((max, entry) => Math.max(max, entry.seq), 0),

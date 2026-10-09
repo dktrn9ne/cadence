@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   HISTORY_CAP,
-  PLAN_FIELDS,
+  HISTORY_FIELDS,
+  JOURNAL_FIELDS,
   QUARANTINE_KEY,
   SCHEMA_VERSION,
   STORE_KEY,
@@ -16,24 +17,6 @@ const PAYER = "rFixtur3PayerAcct11111111111111111111";
 const DEST = "rFixtur3DestAcct11111111111111111111";
 const HASH = "44F0FAKEHASH0000000000000000000000000000000000000000000000000000";
 
-const planFixture = (overrides = {}) => ({
-  id: "person-1734",
-  name: "Fixture Person",
-  role: "Payroll",
-  email: "person@fixture.test",
-  address: DEST,
-  payerAddress: PAYER,
-  weeklyPay: "16",
-  payMode: "weekly",
-  hourlyPay: "20",
-  hoursPerWeek: "40",
-  frequency: "minute",
-  active: true,
-  paidCount: 3,
-  nextRunAt: 1_760_002_206_000,
-  ...overrides,
-});
-
 const historyFixture = () => [
   {
     id: "history-1",
@@ -41,6 +24,13 @@ const historyFixture = () => [
     status: "success",
     title: "Payment submitted",
     detail: `Fixture - tag 2606250005 - ${HASH}`,
+  },
+  {
+    id: "history-2",
+    at: "2026-10-09T17:40:00.000Z",
+    status: "failed",
+    title: "Payment failed",
+    detail: "Wallet confirmation was cancelled.",
   },
 ];
 
@@ -71,8 +61,9 @@ const journalFixture = () => [
   },
 ];
 
+// The record document: history + append-only journal. Plans live in
+// planState (cadence-plans-v1) — this document never carries them.
 const docFixture = (overrides = {}) => ({
-  plans: [planFixture()],
   history: historyFixture(),
   journal: journalFixture(),
   journalSeq: 2,
@@ -94,20 +85,24 @@ describe("canonicalJson and checksum", () => {
 
   it("changes when the document changes", async () => {
     const doc = docFixture();
-    const other = docFixture({ plans: [planFixture({ paidCount: 4 })] });
+    const other = docFixture({
+      journal: [
+        ...journalFixture(),
+        { ...journalFixture()[0], seq: 3, installmentId: "person-1734:4", type: "attempt_outcome", status: "validated_failure" },
+      ],
+    });
     expect(await checksumOf(doc)).not.toBe(await checksumOf(other));
     expect(await checksumOf(doc)).toBe(await checksumOf(docFixture()));
   });
 });
 
 describe("save/load round trip", () => {
-  it("restores plans, history, and journal with progress intact", async () => {
+  it("restores history and the journal intact", async () => {
     const saveResult = await save(docFixture());
     expect(saveResult.ok).toBe(true);
 
     const result = await load();
     expect(result.status).toBe("ok");
-    expect(result.data.plans).toEqual([planFixture()]);
     expect(result.data.history).toEqual(historyFixture());
     expect(result.data.journal).toEqual(journalFixture());
     expect(result.data.journalSeq).toBe(2);
@@ -124,13 +119,25 @@ describe("save/load round trip", () => {
     expect(checksum).toBe(await checksumOf(payload));
   });
 
-  it("drops unknown plan fields on save — never persisted, never resurrected", async () => {
-    await save(docFixture({ plans: [planFixture({ draftState: "editor-noise", signingBlob: "NOT_SECRET_JUST_UNKNOWN" })] }));
+  it("keeps the newest-first history order across save and load", async () => {
+    await save(docFixture());
+    const result = await load();
+    expect(result.data.history.map((row) => row.id)).toEqual(["history-1", "history-2"]);
+  });
+
+  it("drops unknown row fields on save — never persisted, never resurrected", async () => {
+    await save(docFixture({
+      history: [{ ...historyFixture()[0], draftState: "editor-noise", signingBlob: "NOT_SECRET_JUST_UNKNOWN" }],
+      journal: [{ ...journalFixture()[0], walletSnapshot: { seed: "fixture" } }],
+    }));
     const stored = storedDoc();
-    expect(stored.plans[0].draftState).toBeUndefined();
-    expect(stored.plans[0].signingBlob).toBeUndefined();
-    for (const key of Object.keys(stored.plans[0])) {
-      expect(PLAN_FIELDS.includes(key)).toBe(true);
+    expect(stored.history[0].draftState).toBeUndefined();
+    expect(stored.history[0].signingBlob).toBeUndefined();
+    for (const key of Object.keys(stored.history[0])) {
+      expect(HISTORY_FIELDS.includes(key)).toBe(true);
+    }
+    for (const key of Object.keys(stored.journal[0])) {
+      expect(JOURNAL_FIELDS.includes(key)).toBe(true);
     }
   });
 
@@ -142,10 +149,17 @@ describe("save/load round trip", () => {
       title: `row ${index}`,
       detail: "",
     }));
+    // Newest-first list: history-0 is the newest row and must survive.
     await save(docFixture({ history }));
     const stored = storedDoc();
     expect(stored.history).toHaveLength(HISTORY_CAP);
-    expect(stored.history[0].id).toBe("history-0"); // newest first (prepending list)
+    expect(stored.history[0].id).toBe("history-0");
+  });
+
+  it("never lets journalSeq regress below the highest stored seq", async () => {
+    await save(docFixture({ journalSeq: 0 }));
+    const result = await load();
+    expect(result.data.journalSeq).toBe(2);
   });
 });
 
@@ -165,10 +179,10 @@ describe("load failure states", () => {
     expect(quarantined.reason).toBe("unparseable_json");
   });
 
-  it("quarantines a tampered checksum instead of trusting the payload", async () => {
+  it("quarantines a tampered payload instead of trusting it", async () => {
     await save(docFixture());
     const stored = storedDoc();
-    stored.plans[0].paidCount = 99; // tampering
+    stored.journal[1].ledgerResult = "tecKILLED"; // tampering
     localStorage.setItem(STORE_KEY, JSON.stringify(stored));
 
     const result = await load();
@@ -177,7 +191,7 @@ describe("load failure states", () => {
     expect(result.data).toBeUndefined();
     const quarantined = JSON.parse(localStorage.getItem(QUARANTINE_KEY));
     expect(quarantined.reason).toBe("checksum_mismatch");
-    expect(JSON.parse(quarantined.raw).plans[0].paidCount).toBe(99);
+    expect(JSON.parse(quarantined.raw).journal[1].ledgerResult).toBe("tecKILLED");
   });
 
   it("quarantines an unknown future schemaVersion — never guessed at, never downgraded", async () => {
@@ -192,16 +206,15 @@ describe("load failure states", () => {
     expect(result.data).toBeUndefined();
     const quarantined = JSON.parse(localStorage.getItem(QUARANTINE_KEY));
     expect(quarantined.schemaVersion).toBe(99);
-    expect(JSON.parse(quarantined.raw).plans).toHaveLength(1);
+    expect(JSON.parse(quarantined.raw).journal).toHaveLength(2);
   });
 
-  it("excludes invalid plan rows but preserves them in invalidEntries", async () => {
+  it("excludes invalid rows but preserves them in invalidEntries", async () => {
     await save(docFixture());
     const stored = storedDoc();
-    stored.plans.push(
-      { ...planFixture({ id: "person-bad-freq", frequency: "fortnight" }) },
-      { ...planFixture({ id: "person-bad-count", paidCount: 2.5 }) },
-    );
+    stored.history.push({ id: "", title: "row without a valid id" });
+    stored.journal.push({ seq: 0, type: "attempt_started", installmentId: "no-seq" });
+    stored.journal.push({ seq: 3, type: "attempt_outcome", status: "made_up_label", installmentId: "x:1" });
     // Re-sign the tampered doc so checksum passes and row validation runs.
     const { checksum, ...payload } = stored;
     stored.checksum = await checksumOf(payload);
@@ -209,12 +222,13 @@ describe("load failure states", () => {
 
     const result = await load();
     expect(result.status).toBe("invalid");
-    expect(result.data.plans.map((plan) => plan.id)).toEqual(["person-1734"]);
-    expect(result.invalidEntries.map((entry) => entry.row.id)).toEqual([
-      "person-bad-freq",
-      "person-bad-count",
+    expect(result.data.history.map((row) => row.id)).toEqual(["history-1", "history-2"]);
+    expect(result.data.journal.map((entry) => entry.seq)).toEqual([1, 2]);
+    expect(result.invalidEntries.map((entry) => entry.reason)).toEqual([
+      "invalid_history_row",
+      "invalid_journal_entry",
+      "invalid_journal_entry",
     ]);
-    expect(result.data.plans[0]).toEqual(planFixture());
   });
 
   it("treats a non-object document as corrupt", async () => {
@@ -223,51 +237,67 @@ describe("load failure states", () => {
     expect(result.status).toBe("corrupt");
     expect(result.reason).toBe("not_an_object");
   });
+
+  it("treats a missing or non-integer schemaVersion as corrupt", async () => {
+    localStorage.setItem(STORE_KEY, JSON.stringify({ history: [], journal: [] }));
+    const result = await load();
+    expect(result.status).toBe("corrupt");
+    expect(result.reason).toBe("missing_or_invalid_schemaVersion");
+  });
 });
 
 describe("secret exclusion", () => {
-  it("aborts save when a plan carries an accessInput-shaped mnemonic field", async () => {
+  it("aborts when a record carries an accessInput-shaped mnemonic field", () => {
     expect(() =>
-      assertNoSecretMaterial({ plans: [{ ...planFixture(), accessInput: "fixture words are not a real seed" }] }),
+      assertNoSecretMaterial({ history: [{ ...historyFixture()[0], accessInput: "fixture words are not a real seed" }] }),
     ).toThrow(/accessInput/i);
     expect(() =>
-      assertNoSecretMaterial({ plans: [{ ...planFixture(), master_seed: "fixture" }] }),
+      assertNoSecretMaterial({ journal: [{ ...journalFixture()[0], master_seed: "fixture" }] }),
     ).toThrow(/master_seed/i);
     expect(() =>
-      assertNoSecretMaterial({ plans: [{ ...planFixture(), privateKey: "fixture" }] }),
+      assertNoSecretMaterial({ journal: [{ ...journalFixture()[0], privateKey: "fixture" }] }),
     ).toThrow(/privateKey/i);
   });
 
-  it("aborts save on a signed-blob-shaped value", async () => {
+  it("aborts on a signed-blob-shaped value", () => {
     const hexBlob = "A1B2C3D4".repeat(50); // 400 hex chars — signed-blob shape
-    expect(() => assertNoSecretMaterial({ plans: [{ ...planFixture(), note: hexBlob }] })).toThrow(
+    expect(() => assertNoSecretMaterial({ history: [{ ...historyFixture()[0], note: hexBlob }] })).toThrow(
       /signed-blob-shaped/,
     );
   });
 
   it("refuses blob-named keys outright", () => {
-    expect(() => assertNoSecretMaterial({ plans: [{ ...planFixture(), tx_blob: "SHORT" }] })).toThrow(/tx_blob/i);
+    expect(() => assertNoSecretMaterial({ history: [{ ...historyFixture()[0], tx_blob: "SHORT" }] })).toThrow(/tx_blob/i);
   });
 
   it("never writes a secret-bearing document to localStorage", async () => {
     // The whitelist drops unknown fields before the assertion even runs —
     // a mnemonic sneaking in under an unknown key cannot reach storage.
-    await save(docFixture({ plans: [{ ...planFixture(), accessInput: "fixture" }] }));
+    await save(docFixture({
+      journal: [{ ...journalFixture()[0], accessInput: "fixture" }],
+    }));
     const stored = storedDoc();
-    expect(stored.plans).toHaveLength(1);
-    expect(Object.keys(stored.plans[0]).join(",")).not.toMatch(/accessinput/i);
+    expect(stored.journal).toHaveLength(1);
+    expect(JSON.stringify(stored)).not.toMatch(/accessinput/i);
   });
 
   it("keeps a full wallet-shaped state dump out of the document", async () => {
-    // The shape a naive state-dump persistence would produce.
+    // The shape a naive state-dump persistence would produce: save() copies
+    // named fields only, so the dump is ignored outright — and the raw
+    // assertion throws for any caller that bypasses the whitelist.
     const stateDump = {
-      plans: [planFixture()],
-      history: [],
-      journal: [],
-      journalSeq: 0,
+      history: historyFixture(),
+      journal: journalFixture(),
+      journalSeq: 2,
       signingWallet: { seed: "sEdFixtureNotASeed", privateKey: "fixture" },
+      accessInput: "fixture words",
     };
-    expect(() => assertNoSecretMaterial(stateDump)).toThrow(/seed|privateKey/i);
+    expect(() => assertNoSecretMaterial(stateDump)).toThrow(/seed|privateKey|accessInput/i);
+
+    await save(stateDump);
+    const stored = storedDoc();
+    expect(JSON.stringify(stored)).not.toMatch(/signingwallet|seed|privatekey|accessinput/i);
+    expect(stored.history).toHaveLength(2);
   });
 });
 
