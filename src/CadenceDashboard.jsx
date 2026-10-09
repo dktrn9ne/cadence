@@ -1551,6 +1551,11 @@ export default function CadenceDashboard() {
   };
 
   useEffect(() => {
+    // Recovery states (verifying / missed / recovered) live on the plan
+    // card's detail pane — surface them immediately by selecting the first
+    // restored plan when the user has not chosen one yet. StrictMode's
+    // second run keeps whatever selection already exists.
+    setSelectedId((current) => current ?? peopleRef.current[0]?.id ?? null);
     void runRecovery();
   }, []);
 
