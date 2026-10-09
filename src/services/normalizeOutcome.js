@@ -14,8 +14,8 @@
 //
 // Shape provenance (read from source this session, not assumed):
 // - Desktop receipt: submitRlusdPayment returns { result: <submitAndWait
-//   Response>, hash: signed.hash, transaction } — src/CadenceDashboard.jsx:384-396
-//   on this branch. The submitAndWait resolution carries .result with hash,
+//   Response>, hash: signed.hash, transaction } — src/services/payments.js:21-30.
+//   The submitAndWait resolution carries .result with hash,
 //   meta.TransactionResult and validated (installed xrpl 5.0.0,
 //   node_modules/xrpl/dist/npm/sugar/submit.js — waitForFinalTransactionOutcome
 //   returns txResponse once txResponse.result.validated is truthy).
@@ -47,8 +47,9 @@ const LEDGER_RESULT_PATHS = [
   (response) => response?.meta?.TransactionResult,
 ];
 
-// The responseHash fallback chain absorbed from the dashboard
-// (src/CadenceDashboard.jsx:321-328 on this branch; six shapes + null).
+// The responseHash fallback chain absorbed from src/domain/payments.js:18-25
+// (moved there from the dashboard by the testable-core refactor; six shapes
+// + null).
 // Path 1 is Crossmark's raw response nesting (xrpl-connect bundle:9337);
 // paths 2-4 are the dashboard's defensive variants of that nesting; paths 5-6
 // cover the submitter-computed shapes ({ result: { hash } } and { hash }).

@@ -16,7 +16,7 @@ vi.mock("xrpl", () => {
 // sugar/submit.js: waitForFinalTransactionOutcome gates on
 // txResponse.result.validated and reads the transaction). Field style follows
 // rippled's tx JSON: uppercase Account/Destination/Amount/SourceTag, lowercase
-// fee. Chain constants are the dashboard's own (src/CadenceDashboard.jsx:6-9).
+// fee. Chain constants are the repo's own (src/domain/xrpl-constants.js:1-4).
 // The attempt record mirrors the attempt-store schema (PR 11). Addresses are
 // synthetic mainnet-format strings; hashes are arbitrary 64-hex. No mnemonic,
 // seed, private key, or network anywhere in this file.

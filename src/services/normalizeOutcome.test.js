@@ -6,11 +6,11 @@ import { isValidTxHash, normalizeSubmitOutcome } from "./normalizeOutcome.js";
 // module header carries the same map.
 //
 // Chain constants: RLUSD currency/issuer and the Cadence source tag are the
-// dashboard's own values (src/CadenceDashboard.jsx:6-9). Addresses are
+// repo's own values (src/domain/xrpl-constants.js:1-4). Addresses are
 // synthetic mainnet-format strings; tx hashes are arbitrary 64-hex strings.
 // No mnemonic, seed, private key, or network appears anywhere.
 //
-// Desktop receipt (submitRlusdPayment, src/CadenceDashboard.jsx:384-396):
+// Desktop receipt (submitRlusdPayment, src/services/payments.js:21-30):
 // { result: <submitAndWait Response>, hash: signed.hash, transaction }.
 // The submitAndWait Response envelope — .result with hash,
 // meta.TransactionResult, validated — is per installed xrpl 5.0.0
@@ -56,7 +56,7 @@ const desktopReceipt = ({ txHash = TX_HASH, signedHash = TX_HASH, verdict = "tes
       ledger_index: 987654,
     },
   },
-  hash: signedHash, // signed.hash — deterministic pre-submission hash (dashboard:394)
+  hash: signedHash, // signed.hash — deterministic pre-submission hash (services/payments.js:29)
   transaction: { TransactionType: "Payment", SourceTag: SOURCE_TAG },
 });
 
@@ -69,8 +69,9 @@ const gemwalletAdapter = { hash: TX_HASH };
 const xyraResultNoHash = { hash: "", tx_blob: "0123ABCD" };
 
 // The submitter wrapper shape (submitXrplConnectRlusdPayment,
-// dashboard:366-372): { result: <adapter result>, hash: responseHash(result),
-// transaction }. responseHash of an adapter result without a hash is null.
+// src/services/payments.js:12-18): { result: <adapter result>,
+// hash: responseHash(result), transaction }. responseHash of an adapter result
+// without a hash is null.
 const xrplConnectWrapper = (adapterResult, hash = TX_HASH) => ({
   result: adapterResult,
   hash,
@@ -154,9 +155,9 @@ describe("normalizeSubmitOutcome", () => {
 
   describe("absorbed responseHash chain — all six shapes plus null", () => {
     // Paths 2-4 are the dashboard's defensive variants of Crossmark's raw
-    // nesting (dashboard:321-328); they are not produced by any installed
-    // adapter, but the chain absorbs them so no historical response shape
-    // normalizes differently than it did before this module existed.
+    // nesting (src/domain/payments.js:18-25); they are not produced by any
+    // installed adapter, but the chain absorbs them so no historical response
+    // shape normalizes differently than it did before this module existed.
     const chainShapes = [
       ["path 1 (Crossmark raw)", crossmarkRaw],
       ["path 2", { response: { data: { result: { hash: TX_HASH } } } }],
