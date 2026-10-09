@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   OUTCOMES,
   classifyTransactionResult,
+  isValidTxHash,
   lookupTransaction,
   lookupWithClient,
 } from "../src/services/xrplLedger.js";
@@ -40,6 +41,40 @@ describe("classifyTransactionResult", () => {
     expect(classifyTransactionResult({})).toBe(OUTCOMES.UNKNOWN);
     expect(classifyTransactionResult({ meta: {} })).toBe(OUTCOMES.UNKNOWN);
     expect(classifyTransactionResult({ meta: { TransactionResult: "" } })).toBe(OUTCOMES.UNKNOWN);
+  });
+
+  // Ported from main's superseded ledgerReconciler.test.js (PR #15, unwired):
+  // a transaction the ledger has not validated yet carries provisional meta
+  // that can still flip before the ledger closes — it is never a verdict.
+  it("keeps a transaction that is not yet validated unresolved, whatever its meta says", () => {
+    for (const meta of [
+      { TransactionResult: "tesSUCCESS" },
+      { TransactionResult: "tecUNFUNDED_PAYMENT" },
+    ]) {
+      expect(classifyTransactionResult({ meta, validated: false })).toBe(OUTCOMES.UNKNOWN);
+    }
+    expect(
+      classifyTransactionResult({ meta: { TransactionResult: "tesSUCCESS" }, validated: true })
+    ).toBe(OUTCOMES.SUCCESS);
+  });
+});
+
+// Ported from main's superseded normalizeOutcome.test.js (PR #15, unwired):
+// a hash that cannot be looked up is no hash — garbage hashes resolve
+// still_unknown without a network round-trip instead of a doomed request.
+describe("isValidTxHash", () => {
+  it("accepts 64 hex characters in either case", () => {
+    expect(isValidTxHash(HASH)).toBe(true);
+    expect(isValidTxHash(HASH.toLowerCase())).toBe(true);
+  });
+
+  it("rejects anything else", () => {
+    expect(isValidTxHash("")).toBe(false);
+    expect(isValidTxHash(HASH.slice(1))).toBe(false); // 63 chars
+    expect(isValidTxHash(`${HASH}F0`)).toBe(false); // 66 chars
+    expect(isValidTxHash(`x${HASH.slice(1)}`)).toBe(false); // non-hex character
+    expect(isValidTxHash(null)).toBe(false);
+    expect(isValidTxHash(42)).toBe(false);
   });
 });
 
@@ -110,6 +145,30 @@ describe("lookupWithClient", () => {
     await expect(lookupWithClient(client, "")).resolves.toEqual({ outcome: OUTCOMES.UNKNOWN });
     await expect(lookupWithClient(client, null)).resolves.toEqual({ outcome: OUTCOMES.UNKNOWN });
     expect(client.request).not.toHaveBeenCalled();
+  });
+
+  it("never touches the network for a malformed hash (ported from normalizeOutcome)", async () => {
+    const client = makeClient(async () => {
+      throw new Error("lookup must not be attempted");
+    });
+    await expect(lookupWithClient(client, HASH.slice(1))).resolves.toEqual({
+      outcome: OUTCOMES.UNKNOWN,
+    });
+    await expect(lookupWithClient(client, `x${HASH.slice(1)}`)).resolves.toEqual({
+      outcome: OUTCOMES.UNKNOWN,
+    });
+    expect(client.request).not.toHaveBeenCalled();
+  });
+
+  it("keeps a transaction that is not yet validated unresolved (ported from ledgerReconciler)", async () => {
+    const client = makeClient(async () => ({
+      result: {
+        hash: HASH,
+        meta: { TransactionResult: "tesSUCCESS" },
+        validated: false, // provisional application — meta can still flip
+      },
+    }));
+    await expect(lookupWithClient(client, HASH)).resolves.toEqual({ outcome: OUTCOMES.UNKNOWN });
   });
 });
 
@@ -188,5 +247,22 @@ describe("lookupTransaction", () => {
     await expect(lookupTransaction("")).resolves.toEqual({ outcome: OUTCOMES.UNKNOWN });
     await expect(lookupTransaction(null)).resolves.toEqual({ outcome: OUTCOMES.UNKNOWN });
     expect(state.instances).toHaveLength(0);
+  });
+
+  it("builds no client for a malformed hash (ported from normalizeOutcome)", async () => {
+    await expect(lookupTransaction(HASH.slice(1))).resolves.toEqual({ outcome: OUTCOMES.UNKNOWN });
+    await expect(lookupTransaction(`${HASH}F0`)).resolves.toEqual({ outcome: OUTCOMES.UNKNOWN });
+    expect(state.instances).toHaveLength(0);
+  });
+
+  it("keeps an unvalidated transaction unresolved even when the ledger answers (ported from ledgerReconciler)", async () => {
+    state.requestResult = {
+      result: {
+        hash: HASH,
+        meta: { TransactionResult: "tesSUCCESS" },
+        validated: false,
+      },
+    };
+    await expect(lookupTransaction(HASH)).resolves.toEqual({ outcome: OUTCOMES.UNKNOWN });
   });
 });

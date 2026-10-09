@@ -9,7 +9,7 @@ contacted only when a user connects a wallet or requests ledger data.
 ## Stack
 
 - **Runtime:** Node.js 20 (verified on 20.20.2), npm 10 (package-lock.json is the tracked lockfile; ignore stray `bun.lock`)
-- **Web app:** React 19 + Vite 7 (`src/main.jsx` → `src/StreamPayDashboard.jsx`, single 1,822-line component)
+- **Web app:** React 19 + Vite 7 (`src/main.jsx` → `src/CadenceDashboard.jsx`; schedule/payment/wallet logic lives in `src/domain/` and `src/services/`, presentation in `src/brand/`)
 - **Desktop:** Electron 39 wrapper loading the Vite dev server (`electron/main.cjs`, `electron/dev-runner.cjs`)
 - **XRPL libs:** `xrpl`, `@textrp/xrpl-connect`, `@crossmarkio/sdk`; charts via `recharts`
 - **Deploy:** Vercel (`vercel.json`, SPA rewrite to index.html)
@@ -24,6 +24,7 @@ npm run build          # production build → dist/
 npm run desktop        # build then launch Electron with built assets
 npm run preview        # serve dist/
 npm test               # vitest run — full suite once, never watches
+npm run test:watch     # vitest watch mode for iteration
 ```
 
 There is **no lint or typecheck** — `npm test` and `npm run build` are the available static
@@ -34,10 +35,13 @@ proof. Dev-server health check: `curl -sf http://127.0.0.1:5173/`.
 | Path | Role |
 |---|---|
 | `src/main.jsx` | React entry; mounts `CadenceDashboard` into `#root` |
-| `src/StreamPayDashboard.jsx` | The entire UI: opening/connect screen, employer + employee dashboards, income proof, payment flows, XRPL signing |
-| `src/domain/` | Pure logic modules, no I/O: installment state machine (`installment.js`) |
-| `src/smoke.test.js` and colocated `*.test.js` | Vitest suites, run by `npm test` |
-| `streampay-dashboard.jsx` | Root-level copy of the dashboard component (kept in sync manually; not imported by the app) |
+| `src/CadenceDashboard.jsx` | The UI: opening/connect screen, employer + employee dashboards, income proof, payment flows, XRPL signing |
+| `src/domain/` | Pure logic: XRPL constants (`xrpl-constants.js`), schedule math (`schedule.js`), payment builders (`payments.js`), installment state machine (`installment.js`) |
+| `src/services/` | I/O over wallet SDKs: payment submitters (`payments.js`), Crossmark/xrpl-connect accessors (`wallet-connection.js`), transaction-hash reconciliation (`xrplLedger.js`) |
+| `src/storage/` | Durable state: versioned plan/attempt store (`planState.js`) |
+| `src/brand/` | Presentation identity: tokens (`tokens.js`, midnight palette + theme), `CadenceMark.jsx`, `app-icon.png` |
+| `tests/` | Vitest suites: `app.smoke.test.jsx` (render smoke), domain/service contract tests, token pins |
+| `.github/workflows/ci.yml` | GitHub Actions: `npm ci`, `npm test -- --run`, `npm run build`, dist artifact |
 | `electron/main.cjs` | Electron main process; window creation, renderer console logging, dev-server URL via `CADENCE_DEV_SERVER_URL` |
 | `electron/dev-runner.cjs` | Waits for Vite on 127.0.0.1:5173, spawns Electron |
 | `index.html` | Vite entry HTML |
@@ -46,7 +50,7 @@ proof. Dev-server health check: `curl -sf http://127.0.0.1:5173/`.
 | `latest.zip` | Prebuilt downloadable bundle referenced by the README |
 | `streampay-technical-brief.docx` | Product/technical brief document |
 
-## XRPL constants (from README, also hardcoded in `src/StreamPayDashboard.jsx`)
+## XRPL constants (from README; canonical values in `src/domain/xrpl-constants.js`)
 
 - Network: XRPL mainnet, WS `wss://s1.ripple.com`
 - Asset: RLUSD, issuer `rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De`
@@ -56,7 +60,7 @@ proof. Dev-server health check: `curl -sf http://127.0.0.1:5173/`.
 ## Local verification (validated 2026-10-09)
 
 1. `npm run dev` — Vite 7.3.6 ready on `http://127.0.0.1:5173/`, HTTP 200, clean startup log.
-2. Headless Chromium load: title "Cadence on XRP", opening screen renders, **zero console/page errors**;
+2. Headless Chromium load: title "Cadence on XRPL", opening screen renders, **zero console/page errors**;
    screenshot captured during onboarding. Clicking "Connect XRPL wallet" advances to the wallet-selection
    step; a full connection requires a real external XRP wallet (Xaman/Crossmark/GemWallet/Xyra) and
    cannot be completed headlessly — expected boundary, not a defect.

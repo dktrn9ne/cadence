@@ -17,14 +17,25 @@ export const OUTCOMES = {
   UNKNOWN: "still_unknown",
 };
 
+// A hash that cannot be looked up is no hash: a rippled transaction hash is
+// 256-bit hex. A malformed hash could never match a ledger transaction — it
+// can only produce a doomed request or a null match, and both end at
+// `still_unknown`, so the network round-trip is skipped entirely.
+const TX_HASH_RE = /^[0-9A-Fa-f]{64}$/;
+export const isValidTxHash = (hash) => typeof hash === "string" && TX_HASH_RE.test(hash);
+
 // Pure classification: transaction object -> outcome. The ledger's own meta
 // decides (mirrors the income-proof filters on meta.TransactionResult):
 // `tesSUCCESS` validates the payment; any other result code the ledger
 // reports is a validated failure; a usable-but-unrecognized code is still a
 // failure, because the ledger answered and the answer was not success. A
 // response without a readable TransactionResult classifies as unknown — a
-// missing verdict must never be guessed as success or failure.
+// missing verdict must never be guessed as success or failure. A response the
+// ledger has not validated yet (`validated: false`) carries provisional meta
+// that can still flip before the ledger closes, so it is never a verdict
+// either — an unclassified outcome keeps the installment blocked.
 export const classifyTransactionResult = (tx) => {
+  if (tx?.validated === false) return OUTCOMES.UNKNOWN;
   const txResultCode = tx?.meta?.TransactionResult;
   if (txResultCode === "tesSUCCESS") return OUTCOMES.SUCCESS;
   if (typeof txResultCode === "string" && txResultCode.length > 0) return OUTCOMES.FAILURE;
@@ -36,7 +47,7 @@ export const classifyTransactionResult = (tx) => {
 // malformed request) resolves to `still_unknown` rather than rejecting:
 // an unknown outcome blocks the installment, it never fails the caller.
 export const lookupWithClient = async (client, hash) => {
-  if (typeof hash !== "string" || hash.length === 0) {
+  if (!isValidTxHash(hash)) {
     // Nothing to reconcile with — and no outcome can be conjured from it.
     return { outcome: OUTCOMES.UNKNOWN };
   }
@@ -57,7 +68,7 @@ export const lookupWithClient = async (client, hash) => {
 // resolves `still_unknown`; a disconnect error after a successful lookup must
 // not clobber the classification that was already earned.
 export const lookupTransaction = async (hash) => {
-  if (typeof hash !== "string" || hash.length === 0) {
+  if (!isValidTxHash(hash)) {
     return { outcome: OUTCOMES.UNKNOWN };
   }
   const client = new Client(XRPL_WS_URL);

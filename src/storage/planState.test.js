@@ -345,3 +345,112 @@ describe("debounced persistence", () => {
     expect(loadPlans()).toEqual(next);
   });
 });
+
+// Ported from main's superseded attemptStore.test.js (PR #11, unwired).
+// attemptStore REFUSED these inputs by throwing; this store's contract is
+// never-throw allowlist coercion, so the same cases are pinned as scrubbing
+// and type pins instead of exceptions. The safety property is identical: no
+// secret-shaped key and no non-string amount ever reaches persisted bytes.
+describe("ported from attemptStore: secret-shaped keys and amount typing", () => {
+  // attemptStore's exact key filter: /seed|phrase|secret|password|mnemonic|
+  // private[\s_-]?key|accessinput/i — the separator shapes it says a name
+  // filter historically misses are included on purpose.
+  const SECRET_SHAPED = /seed|phrase|secret|password|mnemonic|private[\s_-]?key|accessinput/i;
+  const SECRET_KEYS = [
+    "mnemonic",
+    "seed",
+    "master_seed",
+    "passphrase",
+    "account_secret",
+    "private_key",
+    "private-key",
+    "private key",
+    "accessInput",
+  ];
+  const FAKE_VALUE = (key) => `fixture-not-a-real-${key.toLowerCase().replace(/\s+/g, "-")}`;
+
+  it("scrubs every secret-shaped key name from attempts, across all separator shapes", () => {
+    for (const key of SECRET_KEYS) {
+      expect(SECRET_SHAPED.test(key)).toBe(true); // the filter must catch every name below
+    }
+    const pollutedAttempt = {
+      sequence: 2,
+      status: "submitted",
+      hash: "HASH",
+      submittedAt: 1,
+      amount: "4.000000",
+      ...Object.fromEntries(SECRET_KEYS.map((key) => [key, FAKE_VALUE(key)])),
+    };
+    const next = recordAttempt([basePlan], PLAN_ID, pollutedAttempt);
+    flushPlans();
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const stored = next[0].attempts[INSTALLMENT_KEY];
+    for (const key of SECRET_KEYS) {
+      expect(Object.keys(stored)).not.toContain(key);
+      expect(raw).not.toContain(FAKE_VALUE(key));
+    }
+    // The durability-critical fields survive the scrub untouched.
+    expect(stored.status).toBe("submitted");
+    expect(stored.hash).toBe("HASH");
+  });
+
+  it("scrubs every secret-shaped key name from plans, across all separator shapes", () => {
+    const polluted = {
+      ...basePlan,
+      ...Object.fromEntries(SECRET_KEYS.map((key) => [key, FAKE_VALUE(key)])),
+    };
+    savePlans([polluted]);
+    flushPlans();
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const stored = readStored().plans[0];
+    for (const key of SECRET_KEYS) {
+      expect(Object.keys(stored)).not.toContain(key);
+      expect(raw).not.toContain(FAKE_VALUE(key));
+    }
+    expect(Object.keys(stored)).toEqual([
+      "id",
+      "payer",
+      "destination",
+      "paidCount",
+      "nextRunAt",
+      "active",
+      "attempts",
+    ]);
+  });
+
+  it("persists amounts as strings only — hostile amounts never land as JSON numbers, and the attempt survives", () => {
+    // attemptStore refused these with /exact decimal string/; here the
+    // display-only amount is coerced to a string and the durability-critical
+    // attempt record is never dropped. A float must never reach storage as a
+    // number — that is the invariant behind the decimal-string rule.
+    const hostile = [12.5, "12,50", "1e3", "-1", ".5", "12.5.0", null, undefined];
+    let plans = [basePlan];
+    hostile.forEach((amount, i) => {
+      plans = recordAttempt(plans, PLAN_ID, {
+        sequence: i,
+        status: "submitted",
+        hash: "HASH",
+        submittedAt: i,
+        amount,
+      });
+      expect(plans[0].attempts[`${PLAN_ID}:${i}`]).toBeDefined();
+    });
+    flushPlans();
+    for (const plan of readStored().plans) {
+      for (const stored of Object.values(plan.attempts)) {
+        expect(typeof stored.amount).toBe("string");
+        // Unquoted JSON number = a float landed in storage. Never.
+        expect(JSON.stringify(stored)).not.toMatch(/"amount":\s*-?\d/);
+      }
+    }
+    // A canonical exact decimal string round-trips verbatim.
+    const canonical = recordAttempt([basePlan], PLAN_ID, {
+      sequence: 9,
+      status: "submitted",
+      hash: "HASH",
+      submittedAt: 9,
+      amount: "12.5000",
+    });
+    expect(canonical[0].attempts[`${PLAN_ID}:9`].amount).toBe("12.5000");
+  });
+});

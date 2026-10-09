@@ -261,3 +261,47 @@ describe("transition matrix", () => {
     expect(frozen.status).toBe("submitted");
   });
 });
+
+// Ported from main's superseded paymentOutcome.test.js (PR #11, unwired):
+// its legal-move matrix and expiry rule, expressed through this module's
+// named-transition API. The moves main enumerated as a transition table are
+// re-entered here the way the wired dispatcher does it — through
+// settleValidated/settleRejected/markUnresolved — and the moves main made
+// throw are guarded here by dispatchBlockReason, which fails closed.
+describe("reconciliation re-entry and expiry (ported from paymentOutcome)", () => {
+  it("re-enters from unresolved to validated_failure when the ledger reports a tec* result", () => {
+    // Legal move unresolved -> validated_failure: the lookup finished the
+    // story on the failure side. The installment becomes dispatchable again
+    // as a fresh, user-visible retry.
+    const unresolved = markUnresolved(submittedAttempt(), HASH, NOW + 2);
+    const settled = settleRejected(unresolved, { TransactionResult: "tecNO_LINE" });
+    expect(settled.status).toBe("validated_failure");
+    expect(settled.hash).toBe(HASH); // evidence preserved through re-entry
+    expect(dispatchBlockReason(settled)).toBeNull();
+  });
+
+  it("moves a stale awaiting_signature record to unresolved - the mid-window close", () => {
+    // The expiry rule: a stale in-flight record exits through unresolved
+    // (its submission may still be on-ledger), never straight to a terminal
+    // verdict guessed by a timer.
+    const stale = beginAttempt();
+    const unresolved = markUnresolved(stale, HASH, NOW + 2);
+    expect(unresolved.status).toBe("unresolved");
+    expect(unresolved.hash).toBe(HASH);
+    expect(dispatchBlockReason(unresolved)).toBe("unresolved-attempt");
+  });
+
+  it("a stale in-flight record is blocked and only the ledger lookup re-enters - never a fresh dispatch", () => {
+    for (const stale of [beginAttempt(), submittedAttempt()]) {
+      expect(dispatchBlockReason(stale)).toBe("already-in-flight");
+      const unresolved = markUnresolved(stale, HASH, NOW + 2);
+      expect(dispatchBlockReason(unresolved)).toBe("unresolved-attempt");
+    }
+  });
+
+  it("fail closed: a persisted 'scheduled' status is not a legal attempt state and blocks dispatch", () => {
+    // In this machine attempts begin at awaiting_signature; a record stored
+    // as 'scheduled' is corrupt or foreign, so it must not dispatch.
+    expect(dispatchBlockReason({ status: "scheduled" })).toBe("unknown-attempt-state");
+  });
+});
