@@ -1,0 +1,9 @@
+# Repository policy — auto-detected from GitHub repo settings
+repo: dktrn9ne/cadence
+defaultBranch: main
+merge:
+  method: squash        # all methods (merge/squash/rebase) are allowed; squash is the default
+  requireHumanMerge: true
+branchPolicy:
+  setupPrsFrom: onboard/*
+  protectDefaultBranch: true
