@@ -6,11 +6,12 @@ const BASE_DIRECTIVES = [
   ["default-src", ["'self'"]],
   ["script-src", ["'self'"]],
   // 'unsafe-inline' is required for style attributes set by React/recharts and
-  // for Vite HMR style injection; Google Fonts serves the current bundle's
-  // stylesheet and font files (the local-fonts task may remove these hosts).
-  ["style-src", ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"]],
+  // for Vite HMR style injection.
+  ["style-src", ["'self'", "'unsafe-inline'"]],
   ["img-src", ["'self'", "data:"]],
-  ["font-src", ["'self'", "data:", "https://fonts.gstatic.com"]],
+  // Fonts are self-hosted (Karla ships via @fontsource since PR #31); no
+  // remote font host belongs in the policy.
+  ["font-src", ["'self'", "data:"]],
   ["connect-src", ["'self'", XRPL_WS_URL]],
   ["object-src", ["'none'"]],
   ["base-uri", ["'self'"]],
