@@ -26,7 +26,7 @@ import {
   selectIncomeRows,
   stampPlanPayer,
 } from "./domain/incomeProof";
-import { getXrplConnect, readXamanApiKey } from "./services/wallet-connection.js";
+import { getXrplConnect, readXamanApiKey, installDerivedColorLoopGuard, openWalletPicker } from "./services/wallet-connection.js";
 import { submitRlusdPayment, submitXrplConnectRlusdPayment } from "./services/payments.js";
 
 const LOG_STORAGE_KEY = "cadence-debug-logs-v1";
@@ -1274,6 +1274,13 @@ export default function CadenceDashboard() {
       XyraAdapter,
     } = xrplConnectModule;
 
+    // Loading the SDK module defines and upgrades <xrpl-wallet-connector>,
+    // arming its theming MutationObserver. Install the derived-color loop
+    // guard before the element's first requestAnimationFrame can run the
+    // unguarded derivation — an unguarded write/observe pair can spin the
+    // renderer main thread and starve every timer (see wallet-connection.js).
+    installDerivedColorLoopGuard(xrplConnectorRef.current);
+
     // Xaman is registered only when an API key is configured: the adapter
     // throws "API key is required for Xaman" on init/connect without one,
     // which logged console errors and dead-ended the picker on a Connection
@@ -1352,8 +1359,11 @@ export default function CadenceDashboard() {
       if (!connector) {
         throw new Error("XRPL Connect is still loading. Try again in a moment.");
       }
+      // Idempotent: covers an element remounted since the first install (the
+      // prototype-level guard already protects every instance once armed).
+      installDerivedColorLoopGuard(connector);
       connector.setWalletManager(manager);
-      await connector.open();
+      await openWalletPicker(connector);
     } catch (error) {
       setSigningWallet(null);
       setWalletProvider("");
