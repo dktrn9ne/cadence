@@ -19,7 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CadenceDashboard from "./CadenceDashboard.jsx";
 import { submitXrplConnectRlusdPayment } from "./services/payments.js";
 import { flushPlans } from "./storage/planState.js";
-import { RLUSD_ISSUER } from "./domain/xrpl-constants.js";
+import { RLUSD_CURRENCY, RLUSD_ISSUER, SOURCE_TAG } from "./domain/xrpl-constants.js";
 
 vi.mock("./services/payments.js", () => ({
   submitRlusdPayment: vi.fn(),
@@ -113,7 +113,22 @@ const seedPlans = (plans) => {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: 1, savedAt: Date.now(), plans }));
 };
 
-const tesSUCCESS = { result: { validated: true, meta: { TransactionResult: "tesSUCCESS" } } };
+// A validated `tx` ledger answer whose body IS the seeded attempt's payment
+// (payer, destination, exact amount, RLUSD identity). The reconciler
+// verifies identity before any verdict may classify, so a verdict-only
+// response can no longer represent a real ledger answer in these tests.
+const ledgerBody = (verdict) => ({
+  result: {
+    validated: true,
+    hash: HASH,
+    Account: PAYER_ADDRESS,
+    Destination: DEST_A,
+    Amount: { currency: RLUSD_CURRENCY, issuer: RLUSD_ISSUER, value: "1.000000" },
+    SourceTag: SOURCE_TAG,
+    meta: { TransactionResult: verdict },
+  },
+});
+const tesSUCCESS = ledgerBody("tesSUCCESS");
 
 // A stored plan exactly as the storage allowlist writes it: destination
 // (not address), string schedule fields, attempt ledger keyed by the
@@ -156,6 +171,11 @@ beforeEach(() => {
   window.WebSocket = FakeWebSocket;
   vi.clearAllMocks();
   __clientRequest.mockReset();
+  // Default `tx` answer: the ledger holds a validated transaction whose body
+  // matches the attempt identity these tests run under (payer, destination,
+  // exact amount). Tests exercise the other ledger behaviors — no verdict,
+  // final failure — by overriding this mock.
+  __clientRequest.mockImplementation(() => tesSUCCESS);
 });
 
 afterEach(() => {
@@ -279,12 +299,15 @@ describe("mount recovery: unresolved blocks until reconciled by hash", () => {
       makeSeedPlan({
         nextRunAt: null,
         attempts: {
-          "person-1760000000000:2": {
+          "person-1760000000000:2#1": {
             sequence: 2,
             status: "unresolved",
             hash: HASH,
             submittedAt: now - 5000,
             amount: "1.000000",
+            payer: PAYER_ADDRESS,
+            destination: DEST_A,
+            attemptNo: 1,
           },
         },
       }),
@@ -337,9 +360,7 @@ describe("mount recovery: unresolved blocks until reconciled by hash", () => {
 
   it("a reconciled ledger failure records a failed attempt and never advances", async () => {
     seedUnresolved();
-    __clientRequest.mockResolvedValue({
-      result: { validated: true, meta: { TransactionResult: "tecNO_LINE" } },
-    });
+    __clientRequest.mockResolvedValue(ledgerBody("tecNO_LINE"));
     await mountAndConnect();
 
     expect(__clientRequest).toHaveBeenCalledWith(
@@ -347,25 +368,28 @@ describe("mount recovery: unresolved blocks until reconciled by hash", () => {
     );
     expect(meterCount()).toBe("2 / 7");
     flushPlans();
-    expect(storedPlans()[0].attempts["person-1760000000000:2"].status).toBe("validated_failure");
+    expect(storedPlans()[0].attempts["person-1760000000000:2#1"].status).toBe("validated_failure");
     // A validated_failure is retry-safe: the pay button is enabled again.
     expect(screen.getByRole("button", { name: "Pay one installment" }).disabled).toBe(false);
     expect(screen.getByText(/Recovered payment failed/i)).toBeTruthy();
     expect(submitXrplConnectRlusdPayment).not.toHaveBeenCalled();
   });
 
-  it("an awaiting-signature attempt from a dead session records a failed attempt with no lookup", async () => {
+  it("an awaiting-signature attempt from a dead session parks unresolved — never a retryable failure (audit violation 2)", async () => {
     const now = Date.now();
     seedPlans([
       makeSeedPlan({
         nextRunAt: null,
         attempts: {
-          "person-1760000000000:2": {
+          "person-1760000000000:2#1": {
             sequence: 2,
             status: "awaiting_signature",
             hash: null,
             submittedAt: now,
             amount: "1.000000",
+            payer: PAYER_ADDRESS,
+            destination: DEST_A,
+            attemptNo: 1,
           },
         },
       }),
@@ -376,7 +400,12 @@ describe("mount recovery: unresolved blocks until reconciled by hash", () => {
     expect(__clientRequest).not.toHaveBeenCalled(); // no hash — nothing to look up
     expect(meterCount()).toBe("2 / 7");
     flushPlans();
-    expect(storedPlans()[0].attempts["person-1760000000000:2"].status).toBe("validated_failure");
+    // Whether the submission happened is unknowable by construction, so the
+    // attempt parks unresolved — blocked and surfaced, NEVER in the
+    // retryable validated_failure state: a blind retry after a landed
+    // payment is the double-pay this rule exists to keep closed.
+    expect(storedPlans()[0].attempts["person-1760000000000:2#1"].status).toBe("unresolved");
+    expect(screen.getByRole("button", { name: "Pay one installment" }).disabled).toBe(true);
     expect(submitXrplConnectRlusdPayment).not.toHaveBeenCalled();
   });
 });

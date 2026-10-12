@@ -14,6 +14,7 @@ import {
   lookupTransaction,
   lookupWithClient,
 } from "../src/services/xrplLedger.js";
+import { RLUSD_CURRENCY, RLUSD_ISSUER, SOURCE_TAG } from "../src/domain/xrpl-constants.js";
 
 const XRPL_WS_URL = "wss://s1.ripple.com";
 const HASH = "9A4C000000000000000000000000000000000000000000000000000000000F01";
@@ -169,6 +170,72 @@ describe("lookupWithClient", () => {
       },
     }));
     await expect(lookupWithClient(client, HASH)).resolves.toEqual({ outcome: OUTCOMES.UNKNOWN });
+  });
+});
+
+// ---- identity match BEFORE classification (audit art_FIvT05e6, violation 1)
+
+const EXPECTED = {
+  payer: "rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864",
+  destination: "rEmployeeAccountXXXXXXXXXXXXXXXXXX",
+  amount: "4.000000",
+};
+
+// A validated tesSUCCESS whose body matches the attempt's identity, exactly
+// as a `tx` lookup returns it for a real Cadence payment.
+const txBody = (overrides = {}) => ({
+  hash: HASH,
+  Account: EXPECTED.payer,
+  Destination: EXPECTED.destination,
+  Amount: { currency: RLUSD_CURRENCY, issuer: RLUSD_ISSUER, value: "4.000000" },
+  SourceTag: SOURCE_TAG,
+  meta: { TransactionResult: "tesSUCCESS" },
+  validated: true,
+  ...overrides,
+});
+
+describe("lookupWithClient identity match", () => {
+  it("classifies tesSUCCESS as success when the transaction IS the attempt's payment", async () => {
+    const client = makeClient(async () => ({ result: txBody() }));
+    await expect(lookupWithClient(client, HASH, EXPECTED)).resolves.toEqual({
+      outcome: OUTCOMES.SUCCESS,
+    });
+  });
+
+  it("classifies a matched tec receipt as failure", async () => {
+    const client = makeClient(async () => ({
+      result: txBody({ meta: { TransactionResult: "tecUNFUNDED_PAYMENT" } }),
+    }));
+    await expect(lookupWithClient(client, HASH, EXPECTED)).resolves.toEqual({
+      outcome: OUTCOMES.FAILURE,
+    });
+  });
+
+  // Regression for audit probe P3: a wrong-recipient tesSUCCESS must park
+  // unresolved with the anomaly surfaced, never advance a plan.
+  it.each([
+    ["wrong destination", { Destination: "rWrongRecipientXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" }],
+    ["wrong amount value", { Amount: { currency: RLUSD_CURRENCY, issuer: RLUSD_ISSUER, value: "40.000000" } }],
+    ["wrong amount type (XRP drops)", { Amount: "4000000" }],
+    ["wrong payer", { Account: "rWrongPayerXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" }],
+    ["wrong currency", { Amount: { currency: "58505200000000000000000000000000000000000000000000000000000000000000000000000000", issuer: RLUSD_ISSUER, value: "4.000000" } }],
+    ["wrong issuer", { Amount: { currency: RLUSD_CURRENCY, issuer: "rWrongIssuerXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", value: "4.000000" } }],
+    ["wrong source tag", { SourceTag: 12345 }],
+    ["missing source tag", { SourceTag: undefined }],
+  ])("stays unknown with anomaly identity_mismatch on %s", async (_label, overrides) => {
+    const client = makeClient(async () => ({
+      result: txBody({ meta: { TransactionResult: "tesSUCCESS" }, ...overrides }),
+    }));
+    await expect(lookupWithClient(client, HASH, EXPECTED)).resolves.toEqual({
+      outcome: OUTCOMES.UNKNOWN,
+      anomaly: "identity_mismatch",
+    });
+  });
+
+  it("classifies without an identity check when no expected identity is supplied", async () => {
+    // The bare-reconcile contract (pre-audit call sites) is unchanged.
+    const client = makeClient(async () => ({ result: txBody() }));
+    await expect(lookupWithClient(client, HASH)).resolves.toEqual({ outcome: OUTCOMES.SUCCESS });
   });
 });
 
