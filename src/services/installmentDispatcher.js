@@ -79,6 +79,13 @@ export function createInstallmentDispatcher({
   // know journal internals; it reports, the record layer decides.
   onJournalEvent = null,
 }) {
+  // PR 02 record hook: the append-only payment journal records what the door
+  // actually did. The door reports truth points and owns no journal internals;
+  // a null hook (recovery tooling, tests) simply records nothing.
+  const emitJournal = (event) => {
+    if (typeof onJournalEvent === "function") onJournalEvent(event);
+  };
+
   // Persist one attempt transition durably (planState writes immediately, so
   // the hash survives the reload it exists to be reconciled after) and commit
   // it into app state. Returns whether the record actually landed — callers
@@ -161,6 +168,19 @@ export function createInstallmentDispatcher({
         };
       }
 
+      // PR 02 locked decision: the started row is journaled strictly before
+      // any submit call, so a crash between here and submission leaves a
+      // durable record of the attempt in flight.
+      emitJournal({
+        type: "attempt_started",
+        plan: current,
+        sequence,
+        amount,
+        destination: expected.destination,
+        payerAddress: expected.payer,
+        source,
+      });
+
       // --- build + submit (wallet prompt, or local sign + submitAndWait) ----
       let response;
       try {
@@ -175,11 +195,27 @@ export function createInstallmentDispatcher({
         if (errorClass === "sign_rejected" || errorClass === "construction") {
           attempt = settleRejected(attempt);
           persistAttempt(person.id, attempt);
+          // Journal vocabulary (PR 02): a proven not-submitted attempt has no
+          // hash to reconcile — failed_no_hash, nothing advances.
+          emitJournal({
+            type: "attempt_outcome",
+            installmentId: key,
+            status: "failed_no_hash",
+            error: error?.message || "The payment could not be built or submitted.",
+            reason: errorClass,
+          });
           if (source === "scheduled") unschedule(person.id);
           return { dispatched: true, outcome: "validated_failure", error, hash: null, failureReason: error?.message || "The payment could not be built or submitted." };
         }
         attempt = markUnresolved(attempt, null, now());
         persistAttempt(person.id, attempt);
+        emitJournal({
+          type: "attempt_outcome",
+          installmentId: key,
+          status: "unresolved",
+          error: error?.message || "The submission outcome is unknown — reconciling before any retry.",
+          reason: errorClass,
+        });
         return {
           dispatched: true,
           outcome: "unresolved",
@@ -200,6 +236,12 @@ export function createInstallmentDispatcher({
         // lookup could classify it, and there is no hash to look up.
         attempt = markUnresolved(attempt, null, now());
         persistAttempt(person.id, attempt);
+        emitJournal({
+          type: "attempt_outcome",
+          installmentId: key,
+          status: "unresolved",
+          reason: "no_usable_hash",
+        });
         return {
           dispatched: true,
           outcome: "unresolved",
@@ -258,6 +300,28 @@ export function createInstallmentDispatcher({
         }
       }
       if (!persistAttempt(person.id, settled)) storeDegraded = true;
+
+      // PR 02: journal the terminal label from the settled attempt. The
+      // attempt statuses are validated_success / validated_failure /
+      // unresolved; the journal additionally distinguishes failed_no_hash on
+      // the throw path above, where provability — not the ledger — decided.
+      // The cited ledger result must agree with the settled status: a receipt
+      // that claimed tesSUCCESS but settled as a ledger failure cites no
+      // code, because the verdict came from the reconciliation lookup.
+      const reportedResult = meta?.TransactionResult || undefined;
+      emitJournal({
+        type: "attempt_outcome",
+        installmentId: key,
+        status: settled.status,
+        txHash: settled.hash || undefined,
+        ledgerResult:
+          settled.status === "validated_success"
+            ? "tesSUCCESS"
+            : settled.status === "validated_failure" && reportedResult !== "tesSUCCESS"
+              ? reportedResult
+              : undefined,
+        reason: anomaly || undefined,
+      });
 
       if (settled.status !== "validated_success") {
         if (settled.status === "validated_failure" && source === "scheduled") {
