@@ -4,7 +4,10 @@ Repo: **dktrn9ne/cadence** — "Cadence on XRP", a consumer wallet dashboard for
 verification and scheduled XRP Ledger payments. Single-page React app with an optional
 Electron desktop wrapper. Pure frontend: no backend service, no database, no required
 environment variables. External runtime dependency is XRPL mainnet (`wss://s1.ripple.com`),
-contacted only when a user connects a wallet or requests ledger data.
+contacted only when a user connects a wallet or requests ledger data. The editing
+contract every change must honor — test hygiene, secrets rules, frozen XRPL
+constants, the payment-safety contract — is `AGENTS.md` (repo root); verification
+procedures live in `docs/QA.md`.
 
 ## Stack
 
@@ -36,7 +39,7 @@ proof. Dev-server health check: `curl -sf http://127.0.0.1:5173/`.
 |---|---|
 | `src/main.jsx` | React entry; mounts `CadenceDashboard` into `#root` |
 | `src/CadenceDashboard.jsx` | The UI: opening/connect screen, employer + employee dashboards, income proof, payment flows, XRPL signing |
-| `src/domain/` | Pure logic: XRPL constants (`xrpl-constants.js`), schedule math (`schedule.js`), payment builders (`payments.js`), payer-aware income proof (`incomeProof.js`), installment outcome machines (`installment.js`, `paymentOutcome.js`) |
+| `src/domain/` | Pure logic: XRPL constants (`xrpl-constants.js`), schedule math (`schedule.js`), payment builders (`payments.js`), payer-aware income proof (`incomeProof.js`), installment outcome machines (`installment.js`) |
 | `src/services/` | I/O over wallet SDKs: payment submitters (`payments.js`), Crossmark/xrpl-connect accessors (`wallet-connection.js`), transaction-hash reconciliation (`xrplLedger.js`) |
 | `src/storage/` | Durable state: versioned plan/attempt store (`planState.js`) |
 | `src/brand/` | Presentation identity: tokens (`tokens.js`, midnight palette + theme), `CadenceMark.jsx`, `app-icon.png` |
@@ -47,6 +50,8 @@ proof. Dev-server health check: `curl -sf http://127.0.0.1:5173/`.
 | `index.html` | Vite entry HTML |
 | `vite.config.js` | React plugin, `base: "./"`, dev host 127.0.0.1:5173 |
 | `vercel.json` | Vercel build config + SPA rewrite |
+| `AGENTS.md` | Agent contract: install/test hygiene, payment-safety contract, secrets rules, merge discipline |
+| `docs/` | Verification docs: QA matrix + release gate (`docs/QA.md`), docs index |
 | `latest.zip` | Prebuilt downloadable bundle referenced by the README |
 | `streampay-technical-brief.docx` | Product/technical brief document |
 
@@ -71,6 +76,10 @@ proof. Dev-server health check: `curl -sf http://127.0.0.1:5173/`.
 - If `node_modules` arrives root-owned, Vite's dep optimizer fails with EACCES under `node_modules/.vite`:
   fix with `sudo chown -R $(id -u):$(id -g) node_modules` and restart.
 - No `.env` needed; no secrets required for local dev. `.env`/`.env.local` are gitignored.
+- `npm install`/`npm ci` run a `postinstall` step (`patch-package`) that strips the Google
+  Fonts `@import` baked into `@textrp/xrpl-connect`; the wallet modal renders Karla from the
+  self-hosted `@fontsource/karla` package instead (see `src/main.jsx`). Re-review `patches/`
+  whenever that dependency is bumped.
 - Primary user flow beyond wallet selection needs an external XRPL wallet on mainnet; do not sign real
   transactions during automated verification.
 

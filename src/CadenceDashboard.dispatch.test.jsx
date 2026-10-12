@@ -21,7 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CadenceDashboard from "./CadenceDashboard.jsx";
 import { submitXrplConnectRlusdPayment } from "./services/payments.js";
 import { flushPlans } from "./storage/planState.js";
-import { RLUSD_ISSUER } from "./domain/xrpl-constants.js";
+import { RLUSD_CURRENCY, RLUSD_ISSUER, SOURCE_TAG } from "./domain/xrpl-constants.js";
 
 vi.mock("./services/payments.js", () => ({
   submitRlusdPayment: vi.fn(),
@@ -75,6 +75,39 @@ const PAYER_ADDRESS = "rPayerAccount1111111111111111111111111111111111";
 const DEST_A = "rDestinationA1111111111111111111111111111111111";
 const DEST_B = "rDestinationB2222222222222222222222222222222222";
 const HASH = "9A4C7B2E5D8F1A3C6E9B2D4F7A1C8E3B6D9F2A5C8E1B4D7F0A3C6E9B2D5F8A1C";
+
+// Distinct 64-hex hashes per destination, so two plans submitting "the same"
+// transaction hash in tests stay distinguishable at the fake ledger.
+const hashFor = (destination) => HASH.slice(0, 60) + destination.slice(-4);
+
+// A fake `tx` ledger answer: the real ledger always returns the FULL
+// transaction body for a hash, so the mock rebuilds it from the attempt the
+// app asked about — the same identity the dispatcher recorded before
+// submitting. Identity-MISMATCH semantics (a body that does NOT belong to
+// the attempt) are pinned at the module level (tests/xrplLedger.test.js)
+// and in the dispatcher's unit suite; this fake keeps the wiring tests
+// honest about what a ledger lookup can answer.
+const ledgerTxAnswer = (request, verdict = "tesSUCCESS") => {
+  const plans = JSON.parse(window.localStorage.getItem("cadence-plans-v1") || "{}").plans || [];
+  for (const plan of plans) {
+    for (const attempt of Object.values(plan.attempts || {})) {
+      if (attempt.hash === request.transaction) {
+        return {
+          result: {
+            validated: true,
+            hash: attempt.hash,
+            Account: attempt.payer,
+            Destination: attempt.destination,
+            Amount: { currency: RLUSD_CURRENCY, issuer: RLUSD_ISSUER, value: attempt.amount },
+            SourceTag: SOURCE_TAG,
+            meta: { TransactionResult: verdict },
+          },
+        };
+      }
+    }
+  }
+  return { result: {} };
+};
 
 // Balance reads go over a raw WebSocket in the app; in tests the socket never
 // opens — it immediately answers with a funded RLUSD line so no modal shows.
@@ -189,7 +222,10 @@ describe("guarded per-installment dispatch", () => {
     expect(submitXrplConnectRlusdPayment).toHaveBeenCalledTimes(1);
     expect(screen.getAllByText(/already in flight/i).length).toBeGreaterThan(0);
 
-    // Wallet resolves tesSUCCESS: exactly one advance of paidCount.
+    // Wallet resolves tesSUCCESS (bodyless receipt — the hash is the only
+    // truth it carries): one reconcile-by-hash, one matched ledger answer,
+    // exactly one advance of paidCount.
+    __clientRequest.mockImplementation((request) => ledgerTxAnswer(request));
     await act(async () => {
       resolveSubmit({ result: { meta: { TransactionResult: "tesSUCCESS" } }, hash: HASH });
       for (let i = 0; i < 10; i += 1) await Promise.resolve();
@@ -198,10 +234,10 @@ describe("guarded per-installment dispatch", () => {
   });
 
   it("dispatches two plans due simultaneously (per-installment lock, no global starvation)", async () => {
-    submitXrplConnectRlusdPayment.mockResolvedValue({
-      result: { meta: { TransactionResult: "tesSUCCESS" } },
-      hash: HASH,
-    });
+    __clientRequest.mockImplementation((request) => ledgerTxAnswer(request));
+    submitXrplConnectRlusdPayment.mockImplementation((person) =>
+      Promise.resolve({ result: { meta: { TransactionResult: "tesSUCCESS" } }, hash: hashFor(person.destination) })
+    );
     await connectWallet();
     await addPerson("Riley", DEST_A);
     startPlan();
@@ -234,6 +270,7 @@ describe("guarded per-installment dispatch", () => {
   });
 
   it("logs the start-plan payment as source manual, never scheduled", async () => {
+    __clientRequest.mockImplementation((request) => ledgerTxAnswer(request));
     submitXrplConnectRlusdPayment.mockResolvedValue({
       result: { meta: { TransactionResult: "tesSUCCESS" } },
       hash: HASH,
@@ -246,7 +283,10 @@ describe("guarded per-installment dispatch", () => {
     expect(logSources("payment.installment.requested")).toEqual(["manual"]);
   });
 
-  it("records a failed attempt and never advances when the wallet resolves with no hash", async () => {
+  it("holds unresolved and never advances when the wallet resolves with no hash (audit violation 2)", async () => {
+    // A resolved submission with NO hash may have landed on-ledger — the
+    // response's existence proves nothing. There is nothing to look up, so
+    // the attempt parks unresolved: blocked, surfaced, never auto-retried.
     submitXrplConnectRlusdPayment.mockResolvedValue({ result: {}, hash: null });
     await connectWallet();
     await addPerson("Riley", DEST_A);
@@ -255,16 +295,23 @@ describe("guarded per-installment dispatch", () => {
 
     expect(meterCount()).toMatch(/^0 \/ /);
     const plan = storedPlans().find((item) => item.destination === DEST_A);
-    expect(plan.attempts[`${plan.id}:0`].status).toBe("validated_failure");
-    expect(screen.getAllByText(/Wallet confirmation was cancelled/i).length).toBeGreaterThan(0);
+    expect(plan.attempts[`${plan.id}:0#1`].status).toBe("unresolved");
+    expect(plan.attempts[`${plan.id}:0#1`].hash).toBeNull();
+    expect(screen.getAllByText(/holding this installment unresolved/i).length).toBeGreaterThan(0);
 
-    // A failed attempt is retry-safe: a fresh user-initiated attempt may send.
+    // NOT retry-safe (the old contract): unresolved blocks every entry point —
+    // a hashless unresolved attempt has no anchor to reconcile, so no
+    // dispatch may fire again for this installment.
+    expect(screen.getByRole("button", { name: "Pay one installment" }).disabled).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Pay one installment" }));
     await flushUI(4);
-    expect(submitXrplConnectRlusdPayment).toHaveBeenCalledTimes(2);
+    expect(submitXrplConnectRlusdPayment).toHaveBeenCalledTimes(1);
   });
 
   it("never advances on a tec ledger failure", async () => {
+    // Bodyless receipt + hash: classification belongs to the ledger lookup,
+    // which answers with the transaction's real body — here a tec failure.
+    __clientRequest.mockImplementation((request) => ledgerTxAnswer(request, "tecUNFUNDED_PAYMENT"));
     submitXrplConnectRlusdPayment.mockResolvedValue({
       result: { meta: { TransactionResult: "tecUNFUNDED_PAYMENT" } },
       hash: HASH,
@@ -276,7 +323,7 @@ describe("guarded per-installment dispatch", () => {
 
     expect(meterCount()).toMatch(/^0 \/ /);
     const plan = storedPlans().find((item) => item.destination === DEST_A);
-    expect(plan.attempts[`${plan.id}:0`].status).toBe("validated_failure");
+    expect(plan.attempts[`${plan.id}:0#1`].status).toBe("validated_failure");
     expect(submitXrplConnectRlusdPayment).toHaveBeenCalledTimes(1);
   });
 
@@ -289,7 +336,7 @@ describe("guarded per-installment dispatch", () => {
     await runStartTimer();
 
     const plan = storedPlans().find((item) => item.destination === DEST_A);
-    expect(plan.attempts[`${plan.id}:0`].status).toBe("unresolved");
+    expect(plan.attempts[`${plan.id}:0#1`].status).toBe("unresolved");
     expect(meterCount()).toMatch(/^0 \/ /);
     expect(__clientRequest).toHaveBeenCalledWith(
       expect.objectContaining({ command: "tx", transaction: HASH }),

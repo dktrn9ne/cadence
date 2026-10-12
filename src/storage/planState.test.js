@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyAttempt,
+  attemptKey,
   flushPlans,
+  latestAttemptFor,
   loadPlans,
   recordAttempt,
   savePlans,
@@ -11,7 +13,9 @@ import {
 // module cannot silently desync from these tests.
 const STORAGE_KEY = "cadence-plans-v1";
 const PLAN_ID = "person-1760000000000";
-const INSTALLMENT_KEY = `${PLAN_ID}:2`;
+// Attempts are numbered per installment: the canonical key for the first
+// attempt of sequence 2.
+const INSTALLMENT_KEY = attemptKey(PLAN_ID, 2, 1);
 
 const basePlan = {
   id: PLAN_ID,
@@ -69,6 +73,20 @@ const PERSISTED_PLAN_KEYS = [
   "attempts",
 ];
 
+// The persisted attempt shape: identity fields (payer/destination/amount)
+// feed the reconciler's match; attemptNo carries the per-installment retry
+// number so history is append-only.
+const PERSISTED_ATTEMPT_KEYS = [
+  "sequence",
+  "status",
+  "hash",
+  "submittedAt",
+  "amount",
+  "payer",
+  "destination",
+  "attemptNo",
+];
+
 const readStored = () => JSON.parse(window.localStorage.getItem(STORAGE_KEY));
 
 beforeEach(() => {
@@ -99,6 +117,9 @@ describe("planState round-trip", () => {
           hash: "9A4C4A6C2B21F5E8D3A0C4B21F5E8D3A0C4B21F5E8D3A0C4B21F5E8D3A0C4B2",
           submittedAt: 1760000001234,
           amount: "4.000000",
+          payer: basePlan.payer,
+          destination: basePlan.destination,
+          attemptNo: 1,
         },
       },
     };
@@ -114,7 +135,7 @@ describe("planState round-trip", () => {
     expect(loadPlans()).toEqual([]);
   });
 
-  it("re-keys stored attempts onto the deterministic installment id", () => {
+  it("re-keys stored attempts onto the deterministic per-attempt id", () => {
     window.localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
@@ -239,7 +260,7 @@ describe("planState secret-material pollution", () => {
   });
 
   it("never persists attempt fields outside the allowlist", () => {
-    const next = recordAttempt([basePlan], PLAN_ID, {
+    const result = recordAttempt([basePlan], PLAN_ID, {
       sequence: 2,
       status: "submitted",
       hash: "HASH",
@@ -251,32 +272,44 @@ describe("planState secret-material pollution", () => {
     flushPlans();
 
     const stored = readStored();
-    expect(Object.keys(stored.plans[0].attempts[INSTALLMENT_KEY])).toEqual([
-      "sequence",
-      "status",
-      "hash",
-      "submittedAt",
-      "amount",
-    ]);
+    expect(Object.keys(stored.plans[0].attempts[INSTALLMENT_KEY])).toEqual(PERSISTED_ATTEMPT_KEYS);
     expect(window.localStorage.getItem(STORAGE_KEY)).not.toContain("7C0A9E01BLOB");
-    expect(Object.keys(next[0].attempts[INSTALLMENT_KEY])).toEqual([
-      "sequence",
-      "status",
-      "hash",
-      "submittedAt",
-      "amount",
-    ]);
+    expect(Object.keys(result.plans[0].attempts[INSTALLMENT_KEY])).toEqual(PERSISTED_ATTEMPT_KEYS);
   });
 });
 
 describe("recordAttempt", () => {
-  it("upserts under the deterministic key and persists immediately (no flush, no timers)", () => {
-    const attempt = { sequence: 2, status: "submitted", hash: "HASH", submittedAt: 1760000001234, amount: "4.000000" };
-    const next = recordAttempt([basePlan], PLAN_ID, attempt);
+  it("upserts under the deterministic per-attempt key and persists immediately (no flush, no timers)", () => {
+    const attempt = {
+      sequence: 2,
+      status: "submitted",
+      hash: "HASH",
+      submittedAt: 1760000001234,
+      amount: "4.000000",
+      payer: basePlan.payer,
+      destination: basePlan.destination,
+      attemptNo: 1,
+    };
+    const result = recordAttempt([basePlan], PLAN_ID, attempt);
 
-    expect(next[0].attempts[INSTALLMENT_KEY]).toEqual(attempt);
+    expect(result.persisted).toBe(true);
+    expect(result.plans[0].attempts[INSTALLMENT_KEY]).toEqual(attempt);
     // Immediate persist: storage already holds the attempt without flushPlans.
     expect(readStored().plans[0].attempts[INSTALLMENT_KEY]).toEqual(attempt);
+  });
+
+  it("defaults attemptNo to 1 and fills identity fields with safe defaults", () => {
+    const result = recordAttempt([basePlan], PLAN_ID, { sequence: 2, status: "submitted", hash: "HASH" });
+    expect(result.plans[0].attempts[INSTALLMENT_KEY]).toEqual({
+      sequence: 2,
+      status: "submitted",
+      hash: "HASH",
+      submittedAt: null,
+      amount: "",
+      payer: "",
+      destination: "",
+      attemptNo: 1,
+    });
   });
 
   it("does not mutate the input array (pure update)", () => {
@@ -286,59 +319,130 @@ describe("recordAttempt", () => {
     expect(frozen[0].attempts).toEqual({});
   });
 
-  it("replaces an existing attempt for the same installment id", () => {
-    let plans = [basePlan];
-    plans = recordAttempt(plans, PLAN_ID, { sequence: 2, status: "awaiting_signature", hash: null, submittedAt: 1, amount: "" });
-    plans = recordAttempt(plans, PLAN_ID, { sequence: 2, status: "submitted", hash: "HASH", submittedAt: 2, amount: "4.000000" });
-    expect(Object.keys(plans[0].attempts)).toEqual([INSTALLMENT_KEY]);
-    expect(plans[0].attempts[INSTALLMENT_KEY].status).toBe("submitted");
+  it("numbers each retry its own record instead of overwriting history (audit violation 4)", () => {
+    let result = recordAttempt([basePlan], PLAN_ID, {
+      sequence: 2, status: "awaiting_signature", hash: null, submittedAt: 1, amount: "4.000000",
+      payer: basePlan.payer, destination: basePlan.destination, attemptNo: 1,
+    });
+    result = recordAttempt(result.plans, PLAN_ID, {
+      sequence: 2, status: "unresolved", hash: null, submittedAt: 2, amount: "4.000000",
+      payer: basePlan.payer, destination: basePlan.destination, attemptNo: 2,
+    });
+    // Attempt #1's evidence survives the retry — the dispatcher reads the
+    // newest via latestAttemptFor, storage keeps both.
+    expect(Object.keys(result.plans[0].attempts)).toEqual([
+      INSTALLMENT_KEY,
+      attemptKey(PLAN_ID, 2, 2),
+    ]);
+    expect(result.plans[0].attempts[INSTALLMENT_KEY].status).toBe("awaiting_signature");
+    expect(result.plans[0].attempts[attemptKey(PLAN_ID, 2, 2)].status).toBe("unresolved");
+    expect(readStored().plans[0].attempts[attemptKey(PLAN_ID, 2, 2)].submittedAt).toBe(2);
+  });
+
+  it("replaces the record when the SAME attempt number re-persists (a state transition, not a retry)", () => {
+    let result = recordAttempt([basePlan], PLAN_ID, {
+      sequence: 2, status: "awaiting_signature", hash: null, submittedAt: 1, amount: "4.000000", attemptNo: 1,
+    });
+    result = recordAttempt(result.plans, PLAN_ID, {
+      sequence: 2, status: "submitted", hash: "HASH", submittedAt: 2, amount: "4.000000", attemptNo: 1,
+    });
+    expect(Object.keys(result.plans[0].attempts)).toEqual([INSTALLMENT_KEY]);
+    expect(result.plans[0].attempts[INSTALLMENT_KEY].status).toBe("submitted");
     expect(readStored().plans[0].attempts[INSTALLMENT_KEY].hash).toBe("HASH");
   });
 
-  it("returns the same array reference when the plan is unknown", () => {
+  it("returns persisted: false when the plan is unknown", () => {
     const plans = [basePlan];
-    expect(recordAttempt(plans, "person-unknown", { sequence: 2, status: "submitted" })).toBe(plans);
+    const result = recordAttempt(plans, "person-unknown", { sequence: 2, status: "submitted" });
+    expect(result.plans).toBe(plans);
+    expect(result.persisted).toBe(false);
   });
 
-  it("returns the same array reference when the attempt has no valid sequence", () => {
+  it("returns persisted: false when the attempt has no valid sequence", () => {
     const plans = [basePlan];
-    expect(recordAttempt(plans, PLAN_ID, { sequence: "due" })).toBe(plans);
-    expect(recordAttempt(plans, PLAN_ID, null)).toBe(plans);
+    expect(recordAttempt(plans, PLAN_ID, { sequence: "due" }).persisted).toBe(false);
+    expect(recordAttempt(plans, PLAN_ID, null).persisted).toBe(false);
+  });
+
+  it("reports persisted: false when the storage write fails, instead of pretending success (audit violation 3)", () => {
+    const writeError = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(() => { throw new DOMException("quota exceeded", "QuotaExceededError"); });
+    try {
+      const result = recordAttempt([basePlan], PLAN_ID, { sequence: 2, status: "submitted", hash: "HASH" });
+      expect(result.persisted).toBe(false);
+      // The in-memory state still advanced — the caller decides what a lost
+      // write means; the storage layer must not swallow the signal.
+      expect(result.plans[0].attempts[INSTALLMENT_KEY].hash).toBe("HASH");
+    } finally {
+      writeError.mockRestore();
+    }
   });
 
   it("records a hash-less failure (rejected signing) without advancing anything", () => {
     // The storage layer records exactly what it is told; whether paidCount
-    // advances is the state machine's decision (sibling PR).
-    const next = recordAttempt([basePlan], PLAN_ID, {
+    // advances is the state machine's decision (the dispatcher's).
+    const result = recordAttempt([basePlan], PLAN_ID, {
       sequence: 3,
       status: "validated_failure",
       hash: null,
       submittedAt: 5,
       amount: "4.000000",
     });
-    expect(next[0].attempts[`${PLAN_ID}:3`]).toEqual({
+    expect(result.plans[0].attempts[attemptKey(PLAN_ID, 3, 1)]).toEqual({
       sequence: 3,
       status: "validated_failure",
       hash: null,
       submittedAt: 5,
       amount: "4.000000",
+      payer: "",
+      destination: "",
+      attemptNo: 1,
     });
-    expect(next[0].paidCount).toBe(2); // untouched by storage
+    expect(result.plans[0].paidCount).toBe(2); // untouched by storage
+  });
+});
+
+describe("latestAttemptFor", () => {
+  it("returns the newest attempt for the installment, across numbered retries", () => {
+    const plan = {
+      ...basePlan,
+      attempts: {
+        [attemptKey(PLAN_ID, 2, 1)]: { sequence: 2, status: "validated_failure", hash: null, submittedAt: 1, amount: "4.000000", payer: "", destination: "", attemptNo: 1 },
+        [attemptKey(PLAN_ID, 2, 3)]: { sequence: 2, status: "submitted", hash: "H3", submittedAt: 3, amount: "4.000000", payer: "", destination: "", attemptNo: 3 },
+        [attemptKey(PLAN_ID, 2, 2)]: { sequence: 2, status: "unresolved", hash: null, submittedAt: 2, amount: "4.000000", payer: "", destination: "", attemptNo: 2 },
+        [attemptKey(PLAN_ID, 5, 1)]: { sequence: 5, status: "awaiting_signature", hash: null, submittedAt: 4, amount: "1.000000", payer: "", destination: "", attemptNo: 1 },
+      },
+    };
+    expect(latestAttemptFor(plan, 2).attemptNo).toBe(3);
+    expect(latestAttemptFor(plan, 2).hash).toBe("H3");
+    expect(latestAttemptFor(plan, 5).attemptNo).toBe(1);
+  });
+
+  it("returns null when the installment has no attempts at all", () => {
+    expect(latestAttemptFor(basePlan, 2)).toBeNull();
+    expect(latestAttemptFor(null, 2)).toBeNull();
   });
 });
 
 describe("applyAttempt (pure core)", () => {
   it("returns a new array without touching storage", () => {
     const next = applyAttempt([basePlan], PLAN_ID, { sequence: 1, status: "awaiting_signature", hash: null });
-    expect(Object.keys(next[0].attempts)).toEqual([`${PLAN_ID}:1`]);
+    expect(Object.keys(next[0].attempts)).toEqual([attemptKey(PLAN_ID, 1, 1)]);
     expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
   });
 
+  it("returns the same reference when nothing changed", () => {
+    const plans = [basePlan];
+    expect(applyAttempt(plans, "person-unknown", { sequence: 1, status: "awaiting_signature" })).toBe(plans);
+    expect(applyAttempt(plans, PLAN_ID, { sequence: "due" })).toBe(plans);
+  });
+
   it("preserves sibling plans and their attempts", () => {
-    const other = { ...basePlan, id: "person-other", attempts: { "person-other:7": { sequence: 7, status: "unresolved", hash: "H", submittedAt: 9, amount: "1.000000" } } };
+    const other = { ...basePlan, id: "person-other", attempts: { [attemptKey("person-other", 7, 1)]: { sequence: 7, status: "unresolved", hash: "H", submittedAt: 9, amount: "1.000000", payer: "", destination: "", attemptNo: 1 } } };
     const next = applyAttempt([basePlan, other], "person-other", { sequence: 8, status: "submitted", hash: "H2", submittedAt: 10, amount: "1.000000" });
-    expect(next[1].attempts["person-other:7"]).toEqual({ sequence: 7, status: "unresolved", hash: "H", submittedAt: 9, amount: "1.000000" });
-    expect(next[1].attempts["person-other:8"].hash).toBe("H2");
+    expect(next[1].attempts[attemptKey("person-other", 7, 1)]).toEqual({ sequence: 7, status: "unresolved", hash: "H", submittedAt: 9, amount: "1.000000", payer: "", destination: "", attemptNo: 1 });
+    expect(next[1].attempts[attemptKey("person-other", 8, 1)].hash).toBe("H2");
     expect(next[0]).toEqual(allowlistedPlan);
   });
 });
@@ -382,7 +486,7 @@ describe("debounced persistence", () => {
   it("a recordAttempt immediately after savePlans cancels the stale pending write", () => {
     vi.useFakeTimers();
     savePlans([{ ...basePlan, paidCount: 2 }]);
-    const next = recordAttempt([{ ...basePlan, paidCount: 2 }], PLAN_ID, {
+    const result = recordAttempt([{ ...basePlan, paidCount: 2 }], PLAN_ID, {
       sequence: 2,
       status: "submitted",
       hash: "HASH",
@@ -394,7 +498,7 @@ describe("debounced persistence", () => {
     // ...and when the old debounce fires it must not clobber it with a
     // stale attempt-less envelope.
     vi.advanceTimersByTime(1000);
-    expect(loadPlans()).toEqual(next);
+    expect(loadPlans()).toEqual(result.plans);
   });
 });
 
@@ -433,10 +537,10 @@ describe("ported from attemptStore: secret-shaped keys and amount typing", () =>
       amount: "4.000000",
       ...Object.fromEntries(SECRET_KEYS.map((key) => [key, FAKE_VALUE(key)])),
     };
-    const next = recordAttempt([basePlan], PLAN_ID, pollutedAttempt);
+    const result = recordAttempt([basePlan], PLAN_ID, pollutedAttempt);
     flushPlans();
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    const stored = next[0].attempts[INSTALLMENT_KEY];
+    const stored = result.plans[0].attempts[INSTALLMENT_KEY];
     for (const key of SECRET_KEYS) {
       expect(Object.keys(stored)).not.toContain(key);
       expect(raw).not.toContain(FAKE_VALUE(key));
@@ -468,16 +572,16 @@ describe("ported from attemptStore: secret-shaped keys and amount typing", () =>
     // attempt record is never dropped. A float must never reach storage as a
     // number — that is the invariant behind the decimal-string rule.
     const hostile = [12.5, "12,50", "1e3", "-1", ".5", "12.5.0", null, undefined];
-    let plans = [basePlan];
+    let result = { plans: [basePlan] };
     hostile.forEach((amount, i) => {
-      plans = recordAttempt(plans, PLAN_ID, {
+      result = recordAttempt(result.plans, PLAN_ID, {
         sequence: i,
         status: "submitted",
         hash: "HASH",
         submittedAt: i,
         amount,
       });
-      expect(plans[0].attempts[`${PLAN_ID}:${i}`]).toBeDefined();
+      expect(result.plans[0].attempts[attemptKey(PLAN_ID, i, 1)]).toBeDefined();
     });
     flushPlans();
     for (const plan of readStored().plans) {
@@ -495,6 +599,6 @@ describe("ported from attemptStore: secret-shaped keys and amount typing", () =>
       submittedAt: 9,
       amount: "12.5000",
     });
-    expect(canonical[0].attempts[`${PLAN_ID}:9`].amount).toBe("12.5000");
+    expect(canonical.plans[0].attempts[attemptKey(PLAN_ID, 9, 1)].amount).toBe("12.5000");
   });
 });

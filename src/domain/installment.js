@@ -21,8 +21,37 @@
 //      never by a fresh submission.
 //
 // Attempt records carry public data only: sequence, status, hash,
-// submittedAt. Nothing here accepts, stores, or returns mnemonic, seed,
-// private key, or signed-blob material.
+// submittedAt, amount, payer, destination, attemptNo. Nothing here accepts,
+// stores, or returns mnemonic, seed, private key, or signed-blob material.
+
+// Submission-error classification, by PROVABILITY (audit art_FIvT05e6,
+// violation 2): the question is always "can we prove nothing was submitted?".
+// Only provably pre-submission failures may land in the retryable
+// `validated_failure` state; everything else is possibly-landed and parks in
+// `unresolved`, where only a ledger lookup by hash can release it.
+//
+// - "sign_rejected" — the wallet refused to sign. Verified adapter shape
+//   (@textrp/xrpl-connect 0.6.0): WalletError { name: "WalletError",
+//   code: "SIGN_REJECTED" }. No signature -> no submission -> retry-safe.
+// - "construction" — a provable precondition failure (NOT_CONNECTED). Nothing
+//   was built or relayed -> retry-safe.
+// - "network" (default) — timeouts, transport drops, unknown shapes,
+//   SIGN_FAILED wrappers: none PROVE nothing was submitted, so the attempt
+//   is possibly on-ledger and must never auto-retry.
+const SIGN_REJECTED_CODE = "SIGN_REJECTED";
+const CONSTRUCTION_CODE = "NOT_CONNECTED";
+const SIGN_REJECTED_MESSAGE = /user rejected|rejected by the user|payload rejected/i;
+const CONSTRUCTION_MESSAGE = /connect an xrpl wallet first/i;
+
+export function classifySubmitError(error) {
+  const code = typeof error?.code === "string" ? error.code : "";
+  if (code === SIGN_REJECTED_CODE) return "sign_rejected";
+  if (code === CONSTRUCTION_CODE) return "construction";
+  const message = String(error?.message ?? "");
+  if (SIGN_REJECTED_MESSAGE.test(message)) return "sign_rejected";
+  if (CONSTRUCTION_MESSAGE.test(message)) return "construction";
+  return "network";
+}
 
 // Deterministic per-installment identity — stable across reloads because it
 // derives from plan identity and sequence alone, never from list indexes or

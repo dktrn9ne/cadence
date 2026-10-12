@@ -1,4 +1,5 @@
 import { Client } from "xrpl";
+import { RLUSD_CURRENCY, RLUSD_ISSUER, SOURCE_TAG } from "../domain/xrpl-constants.js";
 
 // Reconciliation read for unresolved installments (PR 04). An installment left
 // in `unresolved` — submitted on-ledger, outcome never observed (reload,
@@ -42,18 +43,47 @@ export const classifyTransactionResult = (tx) => {
   return OUTCOMES.UNKNOWN;
 };
 
+// Identity match BEFORE any classification (audit art_FIvT05e6, violation 1;
+// ported from the reviewed PR 03 reconciler): the looked-up transaction must
+// BE the payment this attempt describes — payer, destination, the exact
+// RLUSD amount string, currency, issuer, source tag. A hash collision or a
+// wrong-row lookup can then never advance a plan. currency/issuer/sourceTag
+// default to the app constants; every call site pays RLUSD.
+// expected: { payer, destination, amount, currency?, issuer?, sourceTag? }.
+export const attemptIdentityMatches = (tx, expected = {}) => {
+  const amount = tx?.Amount;
+  return (
+    tx?.Account === expected?.payer &&
+    tx?.Destination === expected?.destination &&
+    typeof amount === "object" &&
+    amount !== null &&
+    amount.value === expected?.amount &&
+    amount.currency === (expected?.currency ?? RLUSD_CURRENCY) &&
+    amount.issuer === (expected?.issuer ?? RLUSD_ISSUER) &&
+    tx?.SourceTag === (expected?.sourceTag ?? SOURCE_TAG)
+  );
+};
+
 // Lookup against a caller-supplied client — the seam tests use to mock the
 // ledger. Every failure mode inside (txnNotFound, timeout, disconnect,
 // malformed request) resolves to `still_unknown` rather than rejecting:
 // an unknown outcome blocks the installment, it never fails the caller.
-export const lookupWithClient = async (client, hash) => {
+// When `expected` is supplied, the transaction's identity is verified before
+// its verdict may classify: a validated tesSUCCESS that is NOT this attempt's
+// payment resolves `still_unknown` with `anomaly: "identity_mismatch"` — the
+// verdict belongs to someone else's payment and must never advance a plan.
+export const lookupWithClient = async (client, hash, expected) => {
   if (!isValidTxHash(hash)) {
     // Nothing to reconcile with — and no outcome can be conjured from it.
     return { outcome: OUTCOMES.UNKNOWN };
   }
   try {
     const response = await client.request({ command: "tx", transaction: hash });
-    return { outcome: classifyTransactionResult(response?.result) };
+    const tx = response?.result;
+    if (expected && !attemptIdentityMatches(tx, expected)) {
+      return { outcome: OUTCOMES.UNKNOWN, anomaly: "identity_mismatch" };
+    }
+    return { outcome: classifyTransactionResult(tx) };
   } catch {
     // Server and transport errors both mean "outcome not observed": the
     // ledger rejected the lookup (txnNotFound, malformed) or the connection
@@ -67,7 +97,7 @@ export const lookupWithClient = async (client, hash) => {
 // A failed connect or a failed disconnect is transport failure — the lookup
 // resolves `still_unknown`; a disconnect error after a successful lookup must
 // not clobber the classification that was already earned.
-export const lookupTransaction = async (hash) => {
+export const lookupTransaction = async (hash, expected) => {
   if (!isValidTxHash(hash)) {
     return { outcome: OUTCOMES.UNKNOWN };
   }
@@ -76,7 +106,7 @@ export const lookupTransaction = async (hash) => {
   try {
     await client.connect();
     connected = true;
-    return await lookupWithClient(client, hash);
+    return await lookupWithClient(client, hash, expected);
   } catch {
     return { outcome: OUTCOMES.UNKNOWN };
   } finally {
