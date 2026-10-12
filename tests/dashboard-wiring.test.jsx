@@ -22,6 +22,16 @@ vi.mock("../src/services/payments.js", () => ({
   submitXrplConnectRlusdPayment: (...args) => { submitControl.calls += 1; return submitControl.impl(...args); },
 }));
 
+// Controllable reconcile-by-hash: bodyless wallet receipts (every submit
+// fixture here) route through the dispatcher's ledger lookup, so tests own
+// the ledger's answer the same way they own the submit result. Hermetic —
+// no network.
+const reconcileControl = { impl: async () => ({ outcome: "validated_success" }) };
+vi.mock("../src/services/xrplLedger.js", async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, lookupTransaction: (...args) => reconcileControl.impl(...args) };
+});
+
 // Ledger reads (income proof, balance) use a raw WebSocket. Stub it to answer
 // a funded RLUSD line immediately — hermetic and offline; the reconciliation
 // path is exercised through the dispatcher's injected lookup in unit tests.
@@ -183,6 +193,7 @@ beforeEach(() => {
   window.history.pushState({}, "", "/");
   submitControl.impl = null;
   submitControl.calls = 0;
+  reconcileControl.impl = async () => ({ outcome: "validated_success" });
 });
 
 afterEach(() => {
@@ -226,6 +237,9 @@ describe("dashboard payment journal wiring", () => {
 
   it("labels a ledger tec failure as validated_failure", async () => {
     submitControl.calls = 0;
+    // The ledger confirms a failure for the reconciled hash; the wallet's own
+    // receipt reported the tec code the journal cites.
+    reconcileControl.impl = async () => ({ outcome: "validated_failure" });
     submitControl.impl = async () => ({
       result: { hash: "HASH2", meta: { TransactionResult: "tecUNFUNDED_PAYMENT" } },
       hash: "HASH2",
@@ -241,6 +255,7 @@ describe("dashboard payment journal wiring", () => {
 
   it("labels a hash without a readable ledger result as unresolved", async () => {
     submitControl.calls = 0;
+    reconcileControl.impl = async () => ({ outcome: "still_unknown" });
     submitControl.impl = async () => ({ result: { hash: "HASH3" }, hash: "HASH3" });
     seedActivePlan();
     await setupWallet();
@@ -254,7 +269,12 @@ describe("dashboard payment journal wiring", () => {
 
   it("labels a thrown submit as failed_no_hash and does not advance the count", async () => {
     submitControl.calls = 0;
-    submitControl.impl = async () => { throw new Error("Wallet confirmation was cancelled."); };
+    // The real rejection shape: xrpl-connect throws a WalletError with code
+    // SIGN_REJECTED — provably nothing was submitted, so the journal records
+    // a failed attempt with no hash and nothing advances.
+    submitControl.impl = async () => {
+      throw Object.assign(new Error("Wallet confirmation was cancelled."), { code: "SIGN_REJECTED" });
+    };
     seedActivePlan();
     await setupWallet();
     await selectStoredPerson();

@@ -207,7 +207,10 @@ describe("status channel", () => {
     });
     expect(next).not.toBe(plans); // state changed
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    expect(Object.keys(stored.plans[0].attempts)).toEqual(["person-1734:3"]);
+    // Attempts key per attempt — `${installmentId}#${attemptNo}` — so a
+    // retry writes its own durable record and never overwrites the evidence
+    // of the attempt before it.
+    expect(Object.keys(stored.plans[0].attempts)).toEqual(["person-1734:3#1"]);
     expect(getPlanStateStatus().state).toBe("ready");
   });
 });

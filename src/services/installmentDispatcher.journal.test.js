@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createInstallmentDispatcher } from "./installmentDispatcher.js";
 import { OUTCOMES } from "./xrplLedger.js";
+import { RLUSD_CURRENCY, RLUSD_ISSUER, SOURCE_TAG } from "../domain/xrpl-constants.js";
 
 const PAYER = "rFixtur3PayerAcct11111111111111111111";
 const DEST = "rFixtur3DestAcct11111111111111111111";
@@ -46,6 +47,21 @@ function buildDispatcher({ plan = planFixture(), submit, reconcile, order = [] }
   return { dispatcher, plans, events, order };
 }
 
+// A receipt that carries the transaction body — the shape local
+// submitAndWait returns, where the dispatcher verifies identity directly and
+// the ledger meta classifies without a lookup.
+const bodyReceipt = (hash, transactionResult) => ({
+  result: {
+    hash,
+    meta: { TransactionResult: transactionResult },
+    Account: PAYER,
+    Destination: DEST,
+    Amount: { currency: RLUSD_CURRENCY, issuer: RLUSD_ISSUER, value: "2.666667" },
+    SourceTag: SOURCE_TAG,
+  },
+  hash,
+});
+
 describe("dispatcher journal events", () => {
   it("emits attempt_started before the submit call", async () => {
     const order = [];
@@ -53,7 +69,7 @@ describe("dispatcher journal events", () => {
       order,
       submit: async () => {
         order.push("submit-called");
-        return { result: { meta: { TransactionResult: "tesSUCCESS" } }, hash: HASH };
+        return bodyReceipt(HASH, "tesSUCCESS");
       },
     });
     const outcome = await dispatcher.dispatchInstallment(planFixture(), 3, "scheduled", { amount: "2.666667" });
@@ -63,7 +79,7 @@ describe("dispatcher journal events", () => {
 
   it("labels a tesSUCCESS outcome with the hash and ledger result", async () => {
     const { dispatcher, events } = buildDispatcher({
-      submit: async () => ({ result: { meta: { TransactionResult: "tesSUCCESS" } }, hash: HASH }),
+      submit: async () => bodyReceipt(HASH, "tesSUCCESS"),
     });
     await dispatcher.dispatchInstallment(planFixture(), 3, "scheduled", { amount: "2.666667" });
 
@@ -86,10 +102,7 @@ describe("dispatcher journal events", () => {
 
   it("labels a ledger tec-failure as validated_failure, never as paid", async () => {
     const { dispatcher, events } = buildDispatcher({
-      submit: async () => ({
-        result: { meta: { TransactionResult: "tecUNFUNDED_PAYMENT" } },
-        hash: HASH,
-      }),
+      submit: async () => bodyReceipt(HASH, "tecUNFUNDED_PAYMENT"),
     });
     await dispatcher.dispatchInstallment(planFixture(), 3, "scheduled", { amount: "2.666667" });
 
@@ -108,7 +121,13 @@ describe("dispatcher journal events", () => {
     await dispatcher.dispatchInstallment(planFixture(), 3, "scheduled", { amount: "2.666667" });
 
     const outcome = events.find((event) => event.type === "attempt_outcome");
-    expect(reconcile).toHaveBeenCalledWith(HASH);
+    // Main's dispatcher reconciles bodyless receipts by hash with the payment
+    // identity as context, so a later manual reconciliation can double-check.
+    expect(reconcile).toHaveBeenCalledWith(HASH, {
+      amount: "2.666667",
+      destination: DEST,
+      payer: PAYER,
+    });
     expect(outcome.status).toBe("unresolved");
     expect(outcome.txHash).toBe(HASH);
     expect(outcome.ledgerResult).toBeUndefined();
@@ -127,7 +146,7 @@ describe("dispatcher journal events", () => {
     expect(outcome.ledgerResult).toBe("tesSUCCESS");
   });
 
-  it("records failed_no_hash when the submit call throws", async () => {
+  it("parks an unknown submit error as unresolved — provability decides", async () => {
     const { dispatcher, events } = buildDispatcher({
       submit: async () => {
         throw new Error("network unreachable");
@@ -137,26 +156,52 @@ describe("dispatcher journal events", () => {
 
     expect(outcome.dispatched).toBe(true);
     const event = events.find((event) => event.type === "attempt_outcome");
+    // An unknown transport error proves nothing: the submission may have
+    // landed, so only a ledger lookup by hash can release it — never a
+    // failed_no_hash label, which would authorize an automatic retry.
     expect(event).toMatchObject({
-      status: "failed_no_hash",
+      status: "unresolved",
       installmentId: "person-1734:3",
-      reason: "construction_or_network",
+      reason: "network",
     });
     expect(event.error).toContain("network unreachable");
     expect(event.txHash).toBeUndefined();
   });
 
-  it("records failed_no_hash with reason sign_rejected when no hash is returned", async () => {
+  it("records failed_no_hash when the wallet rejects signing", async () => {
     const { dispatcher, events } = buildDispatcher({
-      submit: async () => ({}), // wallet cancelled — no result, no hash
+      submit: async () => {
+        // The real rejection shape: xrpl-connect throws a WalletError with
+        // code SIGN_REJECTED — provably nothing was submitted.
+        throw Object.assign(new Error("Wallet confirmation was cancelled."), { code: "SIGN_REJECTED" });
+      },
     });
-    await dispatcher.dispatchInstallment(planFixture(), 3, "manual", { amount: "2.666667" });
+    const outcome = await dispatcher.dispatchInstallment(planFixture(), 3, "scheduled", { amount: "2.666667" });
 
+    expect(outcome.dispatched).toBe(true);
     const event = events.find((event) => event.type === "attempt_outcome");
     expect(event).toMatchObject({
       status: "failed_no_hash",
       installmentId: "person-1734:3",
       reason: "sign_rejected",
+    });
+    expect(event.error).toContain("Wallet confirmation was cancelled.");
+    expect(event.txHash).toBeUndefined();
+  });
+
+  it("parks a hash-less wallet resolution as unresolved", async () => {
+    const { dispatcher, events } = buildDispatcher({
+      submit: async () => ({}), // wallet resolved — no result, no hash
+    });
+    await dispatcher.dispatchInstallment(planFixture(), 3, "manual", { amount: "2.666667" });
+
+    const event = events.find((event) => event.type === "attempt_outcome");
+    // The wallet's resolution is not proof of either outcome, and no hash
+    // exists to reconcile — the attempt stays blocked as unresolved.
+    expect(event).toMatchObject({
+      status: "unresolved",
+      installmentId: "person-1734:3",
+      reason: "no_usable_hash",
     });
   });
 });
