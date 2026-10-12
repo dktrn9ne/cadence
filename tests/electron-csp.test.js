@@ -15,9 +15,11 @@ describe("buildCsp", () => {
   it("allows only the sources the bundle actually loads", () => {
     const csp = buildCsp();
 
-    // Google Fonts stylesheet + font files until the local-fonts task lands.
-    expect(csp).toContain("style-src 'self' 'unsafe-inline' https://fonts.googleapis.com");
-    expect(csp).toContain("font-src 'self' data: https://fonts.gstatic.com");
+    // Karla is self-hosted via @fontsource — the policy names no remote host.
+    expect(csp).toContain("style-src 'self' 'unsafe-inline'");
+    expect(csp).toContain("font-src 'self' data:");
+    expect(csp).not.toContain("fonts.googleapis.com");
+    expect(csp).not.toContain("fonts.gstatic.com");
   });
 
   it("adds dev-only inline-script and HMR websocket allowances without unsafe-eval", () => {
