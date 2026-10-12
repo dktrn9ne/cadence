@@ -76,6 +76,10 @@ proof. Dev-server health check: `curl -sf http://127.0.0.1:5173/`.
 - If `node_modules` arrives root-owned, Vite's dep optimizer fails with EACCES under `node_modules/.vite`:
   fix with `sudo chown -R $(id -u):$(id -g) node_modules` and restart.
 - No `.env` needed; no secrets required for local dev. `.env`/`.env.local` are gitignored.
+- `npm install`/`npm ci` run a `postinstall` step (`patch-package`) that strips the Google
+  Fonts `@import` baked into `@textrp/xrpl-connect`; the wallet modal renders Karla from the
+  self-hosted `@fontsource/karla` package instead (see `src/main.jsx`). Re-review `patches/`
+  whenever that dependency is bumped.
 - Primary user flow beyond wallet selection needs an external XRPL wallet on mainnet; do not sign real
   transactions during automated verification.
 
