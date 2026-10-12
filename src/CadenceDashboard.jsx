@@ -2258,6 +2258,7 @@ export default function CadenceDashboard() {
           .pattern-wave svg, .pattern-wave path, .pattern-dots, .stream-live, .stream-wave-line, .stream-wave circle { animation: none; }
         }
       `}</style>
+      <StorageBanner status={storageStatus} onAcknowledge={acknowledgeStorageIssue} />
       {screen === "intro" && <Intro method={method} setMethod={setMethod} accessInput={accessInput} setAccessInput={setAccessInput} expectedAddress={expectedAddress} setExpectedAddress={setExpectedAddress} onSubmit={finishSetup} error={setupError} onConnectorError={setSetupError} isLocal={localDesktop} connectorRef={xrplConnectorRef} xrplManager={xrplConnectManager} />}
       {screen === "dashboard" && (
         <>

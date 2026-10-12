@@ -396,4 +396,23 @@ describe("dashboard payment journal wiring", () => {
     // contract is "no pin", so any falsy value means unchanged behavior.
     expect(plan.payerAddress ?? plan.payer).toBeFalsy();
   });
+
+  it("surfaces corrupt stored data as a visible banner with an acknowledge path", async () => {
+    // Tampered checksum in the payments doc + truncated JSON in the plans
+    // store: every non-healthy persistence state must be visible, not
+    // silently swallowed (the mount point was lost in a merge refactor once
+    // before — this test is its regression guard).
+    window.localStorage.setItem(
+      STORE_KEY,
+      JSON.stringify({ schemaVersion: SCHEMA_VERSION, history: [], journal: [], journalSeq: 0, checksum: "deadbeef" }),
+    );
+    window.localStorage.setItem(PLAN_KEY, '{"version":1,"plans":');
+
+    render(<CadenceDashboard />);
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    expect(screen.getByRole("alert").textContent).toMatch(/quarantine|corrupt|unreadable|could not|starting/i);
+    fireEvent.click(screen.getByRole("button", { name: /acknowledge/i }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
 });
