@@ -28,6 +28,10 @@ jobs:
 
       - run: npm run test:browser
 
+      - run: sudo apt-get install -y xvfb libgtk-3-0t64 libasound2t64
+
+      - run: xvfb-run -a npm run test:desktop
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:

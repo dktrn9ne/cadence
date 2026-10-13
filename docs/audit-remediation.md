@@ -27,7 +27,7 @@ Scope: repairs to main `7a542a6`, tracked in issue #34. All payment verification
 - `npm run build`: passed; circular XRPL chunk warning removed.
 - `npm audit`: **zero reported vulnerabilities** in the resolved dependency graph. This does not establish that code bundled inside the wallet SDK has no vulnerabilities.
 - `npm run release:check`: archive byte comparison is part of the release gate.
-- Production-browser tests are added to CI for same-origin tab ownership and a 390px viewport. Local execution was blocked: the browser download was empty/truncated in this environment. Electron launch was also blocked by the environment's socket/process restrictions. These checks are not represented as local passes.
+- Production-browser checks passed in CI for same-origin tab ownership and a 390px viewport. A built-Electron opening/session smoke is also part of the updated CI gate. Local execution was blocked: the browser download was empty/truncated in this environment. Electron launch was also blocked by the environment's socket/process restrictions. These checks are not represented as local passes.
 - Local runtime: Node 24. CI verifies the supported Node 22 baseline.
 - A full real-wallet web/desktop flow remains a human release check. No funds, wallet secrets, or actual signing are used by the automated gate.
 

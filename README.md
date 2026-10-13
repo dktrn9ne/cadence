@@ -132,6 +132,6 @@ From a Git checkout with Python 3 installed, run `npm run release:archive` after
 
 ## Verification
 
-Run `npm ci`, `npm test`, `npm run build`, and `npm run release:check`. For the production browser smoke, install Chromium with `npx playwright install chromium`, then run `npm run test:browser`. Browser checks exercise ownership and viewport rendering without connecting a wallet or contacting the ledger.
+Run `npm ci`, `npm test`, `npm run build`, and `npm run release:check`. For the production browser smoke, install Chromium with `npx playwright install chromium`, then run `npm run test:browser`. Browser checks exercise ownership and viewport rendering without connecting a wallet or contacting the ledger. `npm run test:desktop` verifies the built Electron opening screen and session ownership without importing a wallet; Linux CI runs it under Xvfb.
 
 The install-time font patch is a small version-checked script, `scripts/patch-sdk-fonts.mjs`; upgrading the pinned wallet connector requires reviewing that script. Crossmark remains supported by XRPL Connect's adapter; the unused standalone SDK has been removed.

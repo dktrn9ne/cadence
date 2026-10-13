@@ -14,7 +14,8 @@
     "postinstall": "node scripts/patch-sdk-fonts.mjs",
     "release:archive": "python3 scripts/release_archive.py",
     "release:check": "python3 scripts/release_archive.py --check",
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "test:desktop": "playwright test --config playwright.desktop.config.js"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",
