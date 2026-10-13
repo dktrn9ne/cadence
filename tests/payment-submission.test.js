@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const xrplState = vi.hoisted(() => ({ clients: [], failNextSubmit: false }));
-const crossmarkState = vi.hoisted(() => ({ sdk: { async: {}, sync: {} } }));
 
 vi.mock("xrpl", () => {
   class Client {
@@ -20,10 +19,8 @@ vi.mock("xrpl", () => {
   return { Client };
 });
 
-vi.mock("@crossmarkio/sdk", () => ({ default: crossmarkState.sdk }));
 
 import {
-  submitCrossmarkRlusdPayment,
   submitRlusdPayment,
   submitXrplConnectRlusdPayment,
 } from "../src/services/payments.js";
@@ -37,8 +34,6 @@ const AMOUNT = "12.5";
 beforeEach(() => {
   xrplState.clients.length = 0;
   xrplState.failNextSubmit = false;
-  crossmarkState.sdk.async = {};
-  crossmarkState.sdk.sync = {};
 });
 
 describe("submitRlusdPayment", () => {
@@ -68,27 +63,10 @@ describe("submitRlusdPayment", () => {
     const wallet = { address: PAYER, sign: () => ({ tx_blob: "SIGNED_BLOB", hash: "SIGNED_HASH" }) };
 
     await expect(submitRlusdPayment({ wallet, destination: DESTINATION, amount: AMOUNT })).rejects.toThrow(
-      "submission failed"
+      "submission outcome is unknown"
     );
 
     expect(xrplState.clients.at(-1).disconnect).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("submitCrossmarkRlusdPayment", () => {
-  it("signs the crossmark payment and returns the full shape", async () => {
-    const response = { response: { data: { resp: { result: { hash: "CROSSMARK_HASH" } } } } };
-    crossmarkState.sdk.async.signAndSubmitAndWait = vi.fn(async () => response);
-    const expectedPayment = buildCrossmarkRlusdPayment({ account: PAYER, destination: DESTINATION, amount: AMOUNT });
-
-    const outcome = await submitCrossmarkRlusdPayment({ account: PAYER, destination: DESTINATION, amount: AMOUNT });
-
-    expect(crossmarkState.sdk.async.signAndSubmitAndWait).toHaveBeenCalledWith(expectedPayment);
-    expect(outcome).toEqual({
-      result: response,
-      hash: "CROSSMARK_HASH",
-      transaction: expectedPayment,
-    });
   });
 });
 
@@ -115,5 +93,28 @@ describe("submitXrplConnectRlusdPayment", () => {
       hash: "MANAGER_HASH",
       transaction: expectedPayment,
     });
+  });
+});
+
+
+describe("local pre-submission recovery hash", () => {
+  const hash = "AB".repeat(32);
+  const wallet = () => ({ address: PAYER, sign: () => ({ tx_blob: "OFFLINE_FIXTURE_BLOB", hash }) });
+  it("persists only the hash before relay and retains it on timeout", async () => {
+    xrplState.failNextSubmit = true;
+    const onPrepared = vi.fn((received) => {
+      expect(received).toBe(hash);
+      expect(xrplState.clients.at(-1).submitAndWait).not.toHaveBeenCalled();
+    });
+    await expect(submitRlusdPayment({ wallet: wallet(), destination: DESTINATION, amount: AMOUNT, onPrepared })).rejects.toMatchObject({ code: "SUBMISSION_UNKNOWN", hash });
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+  });
+  it("never relays when persisting the prepared hash fails", async () => {
+    await expect(submitRlusdPayment({ wallet: wallet(), destination: DESTINATION, amount: AMOUNT, onPrepared: () => { throw new Error("quota"); } })).rejects.toMatchObject({ code: "NOT_CONNECTED", hash: null });
+    expect(xrplState.clients.at(-1).submitAndWait).not.toHaveBeenCalled();
+  });
+  it("a disconnect failure cannot erase a confirmed receipt", async () => {
+    const onPrepared = () => { xrplState.clients.at(-1).disconnect.mockRejectedValue(new Error("offline")); };
+    expect((await submitRlusdPayment({ wallet: wallet(), destination: DESTINATION, amount: AMOUNT, onPrepared })).hash).toBe(hash);
   });
 });

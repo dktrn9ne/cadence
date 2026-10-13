@@ -1,3 +1,4 @@
+import BigNumber from "bignumber.js";
 import { Client } from "xrpl";
 import { RLUSD_CURRENCY, RLUSD_ISSUER, SOURCE_TAG } from "../domain/xrpl-constants.js";
 
@@ -36,7 +37,7 @@ export const isValidTxHash = (hash) => typeof hash === "string" && TX_HASH_RE.te
 // that can still flip before the ledger closes, so it is never a verdict
 // either — an unclassified outcome keeps the installment blocked.
 export const classifyTransactionResult = (tx) => {
-  if (tx?.validated === false) return OUTCOMES.UNKNOWN;
+  if (tx?.validated !== true) return OUTCOMES.UNKNOWN;
   const txResultCode = tx?.meta?.TransactionResult;
   if (txResultCode === "tesSUCCESS") return OUTCOMES.SUCCESS;
   if (typeof txResultCode === "string" && txResultCode.length > 0) return OUTCOMES.FAILURE;
@@ -51,13 +52,16 @@ export const classifyTransactionResult = (tx) => {
 // default to the app constants; every call site pays RLUSD.
 // expected: { payer, destination, amount, currency?, issuer?, sourceTag? }.
 export const attemptIdentityMatches = (tx, expected = {}) => {
-  const amount = tx?.Amount;
+  const amount = tx?.Amount ?? tx?.DeliverMax;
   return (
     tx?.Account === expected?.payer &&
     tx?.Destination === expected?.destination &&
     typeof amount === "object" &&
     amount !== null &&
-    amount.value === expected?.amount &&
+    new BigNumber(amount.value).isFinite() &&
+    new BigNumber(amount.value).isGreaterThan(0) &&
+    new BigNumber(amount.value).isEqualTo(expected?.amount) &&
+    !(Number(tx?.Flags || 0) & 0x00020000) &&
     amount.currency === (expected?.currency ?? RLUSD_CURRENCY) &&
     amount.issuer === (expected?.issuer ?? RLUSD_ISSUER) &&
     tx?.SourceTag === (expected?.sourceTag ?? SOURCE_TAG)

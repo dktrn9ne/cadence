@@ -233,7 +233,7 @@ describe("selectExcludedXrpEntries", () => {
 });
 
 describe("buildIncomeProofStats", () => {
-  it("aggregates totals and projections from two rows one day apart", () => {
+  it("aggregates totals but withholds estimates from a one-day sample", () => {
     const newer = matchingEntry({ close_time_iso: "2026-10-02T12:00:00.000Z" });
     newer.meta = { ...newer.meta, delivered_amount: rlusd("10") };
     const older = matchingEntry();
@@ -253,9 +253,9 @@ describe("buildIncomeProofStats", () => {
     expect(stats.excludedCount).toBe(1);
     expect(stats.totalExcludedXrp).toBe(1);
     expect(stats.observedDays).toBe(1);
-    expect(stats.projectedWeekly).toBeCloseTo(245);
-    expect(stats.projectedMonthly).toBeCloseTo(1050);
-    expect(stats.projectedAnnual).toBeCloseTo(12775);
+    expect(stats.projectedWeekly).toBeNull();
+    expect(stats.projectedMonthly).toBeNull();
+    expect(stats.projectedAnnual).toBeNull();
     expect(stats.lifetimeMatches).toBe(2);
   });
 
@@ -416,5 +416,35 @@ describe("AC5 · buildIncomeProofCsv", () => {
   it("emits one row per counted payment", () => {
     const rows = selectIncomeRows([matchingEntry(), matchingEntry()], { payer: PAYER_A, destination: WORKER });
     expect(buildIncomeProofCsv(rows).split("\n")).toHaveLength(rows.length + 1);
+  });
+});
+
+
+describe("audit income-proof regressions", () => {
+  it("never annualizes one receipt, simultaneous receipts, or incomplete history", () => {
+    const [row] = selectIncomeRows([matchingEntry()], { payer: PAYER_A, destination: WORKER });
+    for (const incomeRows of [[row], [row, row, row]]) {
+      expect(buildIncomeProofStats({ incomeRows, excludedXrpEntries: [], markerRemaining: false }).projectedAnnual).toBeNull();
+    }
+  });
+  it("estimates only after a week and excludes the unknown first earning interval", () => {
+    const rows = [
+      { amount: 100, iso: "2026-10-01T00:00:00Z" },
+      { amount: 100, iso: "2026-10-08T00:00:00Z" },
+      { amount: 100, iso: "2026-10-15T00:00:00Z" },
+    ];
+    const stats = buildIncomeProofStats({ incomeRows: rows, excludedXrpEntries: [], markerRemaining: false });
+    expect(stats.projectedWeekly).toBe(100);
+    expect(stats.totalRlusd).toBe(300);
+    expect(buildIncomeProofStats({ incomeRows: rows, excludedXrpEntries: [], markerRemaining: true }).projectedAnnual).toBeNull();
+  });
+  it("requires explicit validation and a positive delivered amount; never uses requested Amount", () => {
+    const args = { payer: PAYER_A, destination: WORKER };
+    for (const delivered of [undefined, "unavailable", rlusd("NaN"), rlusd("0"), rlusd("-1")]) {
+      expect(isMatchingIncomeTx(matchingEntry({ meta: { TransactionResult: "tesSUCCESS", delivered_amount: delivered } }), args)).toBe(false);
+    }
+    expect(isMatchingIncomeTx(matchingEntry({ validated: undefined }), args)).toBe(false);
+    const partial = matchingEntry({ meta: { TransactionResult: "tesSUCCESS", delivered_amount: rlusd("2") } });
+    expect(selectIncomeRows([partial], args)[0].amount).toBe(2);
   });
 });

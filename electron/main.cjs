@@ -14,7 +14,7 @@ function writeDesktopLog(message) {
 
 // Delivers the CSP as a response header on every document load. Electron's
 // webRequest listener sees both http(s) (Vite dev server) and file:// (built
-// dist) main-frame responses in Electron 39, so one mechanism covers both
+// dist) main-frame responses in Electron 41, so one mechanism covers both
 // load paths without touching the shipped index.html used by the web deploy.
 function attachContentSecurityPolicy() {
   const devOrigin = devServerUrl ? new URL(devServerUrl).origin : null;
@@ -61,7 +61,11 @@ function createWindow() {
   });
 
   window.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    // Never hand arbitrary file/custom protocols to the operating system.
+    try {
+      const parsed = new URL(url);
+      if (["https:", "http:"].includes(parsed.protocol)) shell.openExternal(url);
+    } catch { /* Invalid URLs stay inside the denied navigation. */ }
     return { action: "deny" };
   });
 
@@ -85,7 +89,16 @@ function createWindow() {
   window.loadFile(path.join(__dirname, "..", "dist", "index.html"), { search: desktopSearch });
 }
 
-app.whenReady().then(() => {
+// Electron's process lock covers separate desktop processes as well as tabs.
+// The Web Locks owner in the renderer then protects same-origin windows.
+const ownsDesktop = app.requestSingleInstanceLock();
+if (!ownsDesktop) app.quit();
+else app.on("second-instance", () => {
+  const existing = BrowserWindow.getAllWindows()[0];
+  if (existing) { if (existing.isMinimized()) existing.restore(); existing.focus(); }
+});
+
+if (ownsDesktop) app.whenReady().then(() => {
   attachContentSecurityPolicy();
   createWindow();
 

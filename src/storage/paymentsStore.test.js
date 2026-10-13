@@ -316,3 +316,18 @@ describe("save failure handling", () => {
     }
   });
 });
+
+
+describe("ordered public record writes", () => {
+  it("keeps the newest journal when overlapping saves are issued and snapshots only public fields", async () => {
+    const first = { history: historyFixture(), journal: journalFixture(), ignored: () => {} };
+    const second = { history: [{ ...historyFixture()[0], title: "Newer record" }], journal: [...journalFixture()] };
+    const one = save(first);
+    const two = save(second);
+    second.history[0].title = "Mutated after save";
+    await Promise.all([one, two]);
+    const result = await load();
+    expect(result.data.history[0].title).toBe("Newer record");
+    expect(JSON.parse(localStorage.getItem(STORE_KEY))).not.toHaveProperty("ignored");
+  });
+});

@@ -13,7 +13,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - run: npm ci
@@ -21,6 +21,12 @@ jobs:
       - run: npm test -- --run
 
       - run: npm run build
+
+      - run: npm run release:check
+
+      - run: npx playwright install --with-deps chromium
+
+      - run: npm run test:browser
 
       - uses: actions/upload-artifact@v4
         if: always()

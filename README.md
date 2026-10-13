@@ -6,14 +6,14 @@ The web version uses XRPL Connect so supported XRP wallets can connect to Cadenc
 
 ## Run From latest.zip
 
-1. Install Node.js LTS from [nodejs.org](https://nodejs.org/).
+1. Install Node.js 22.12 or newer from [nodejs.org](https://nodejs.org/).
 2. Download `latest.zip` from this repo.
 3. Unzip it.
 4. Open a terminal in the unzipped folder.
 5. Install dependencies:
 
 ```powershell
-npm install
+npm ci
 ```
 
 6. Start the local desktop app:
@@ -25,7 +25,7 @@ npm run desktop:dev
 If Windows PowerShell blocks `npm`, use:
 
 ```powershell
-npm.cmd install
+npm.cmd ci
 npm.cmd run desktop:dev
 ```
 
@@ -46,7 +46,7 @@ http://127.0.0.1:5173/
 7. Add a recipient XRPL address and payment rhythm from the employer dashboard.
 8. Local desktop signs each payment with the imported wallet. Web asks the connected XRPL wallet to confirm each payment request.
 
-The income verification page reads real `account_tx` ledger data for the connected wallet only. It filters verified income to successful incoming RLUSD payments from the Cadence employer wallet using `SourceTag: 2606250005`.
+The income verification page reads real `account_tx` ledger data for the connected wallet only. It counts only explicitly validated incoming RLUSD payments with a positive ledger-delivered amount, the matching payer and recipient, and `SourceTag: 2606250005`. The payer comes from the matching local plan; when no plan resolves, the historical Cadence employer wallet is shown as a labeled demo fallback.
 
 ## Continuous Payments
 
@@ -55,6 +55,13 @@ Cadence can submit real XRPL mainnet transactions.
 - Recipient payments are RLUSD `Payment` transactions.
 - Each stream/installment submits one RLUSD payment directly to the designated recipient wallet.
 - Source tag: `2606250005`
+- Keep the app open and the device awake: this is an app-driven scheduler, not an always-on payroll service.
+- One active payment session is allowed per browser origin/profile. Close the owning tab and refresh another tab to transfer ownership. Browsers without Web Locks cannot submit payments.
+- The desktop shell permits one process instance. Separate browsers, profiles, devices, and web/desktop surfaces do not share a distributed lock.
+- Each plan pays one weekly total and then stops. Missed windows require individual approval.
+- Amounts use integer micro-units. Prior successful receipts determine the remaining balance, and the final installment reconciles exactly to the weekly total.
+- Older plans with incomplete prior receipt evidence are blocked until the operator reviews wallet history and creates a new plan for the remaining amount.
+- Recipient, payer, amount, and frequency cannot change after a payment attempt starts. Pause the old plan and create a new plan for changed terms.
 
 The web version asks the connected XRPL wallet to confirm each recipient payment. The local desktop version signs and submits each recipient payment with the imported mnemonic/family seed wallet.
 
@@ -71,6 +78,13 @@ Cadence uses XRPL Connect for the web wallet selector. The current web flow incl
 - RLUSD currency code: `524C555344000000000000000000000000000000`
 - Cadence employer wallet: `rEfcBKrxNp8mxL4xu46R5wL3ex4dpDE864`
 - Source tag: `2606250005`
+- Keep the app open and the device awake: this is an app-driven scheduler, not an always-on payroll service.
+- One active payment session is allowed per browser origin/profile. Close the owning tab and refresh another tab to transfer ownership. Browsers without Web Locks cannot submit payments.
+- The desktop shell permits one process instance. Separate browsers, profiles, devices, and web/desktop surfaces do not share a distributed lock.
+- Each plan pays one weekly total and then stops. Missed windows require individual approval.
+- Amounts use integer micro-units. Prior successful receipts determine the remaining balance, and the final installment reconciles exactly to the weekly total.
+- Older plans with incomplete prior receipt evidence are blocked until the operator reviews wallet history and creates a new plan for the remaining amount.
+- Recipient, payer, amount, and frequency cannot change after a payment attempt starts. Pause the old plan and create a new plan for changed terms.
 
 ## Safety Notes
 
@@ -101,3 +115,23 @@ npm run build
 npm run desktop
 npm run preview
 ```
+
+## Recover an Interrupted Payment
+
+An unknown submission remains blocked; Cadence never assumes it failed and never blindly retries it.
+
+- Desktop signing persists the public transaction hash before relaying the signed transaction. A transport timeout can therefore be reconciled by hash.
+- If a web wallet or an older session lost the hash, open the plan's recovery form and paste the public 64-character transaction hash from wallet history. Cadence verifies payer, recipient, numeric RLUSD amount, issuer, source tag, and ledger validation before settling the held attempt. A hash already used by another attempt is refused.
+- If the ledger cannot confirm the transaction, or there is no hash and no proof that nothing was submitted, the installment stays blocked. This release does not implement transaction-history discovery or an override that resets unknown payments.
+
+Income estimates require at least three confirmed payments spanning seven days of complete fetched history. The first receipt establishes the timing baseline and is excluded from the rate numerator. Estimates describe observed payments; they do not verify employment or guarantee future income.
+
+## Maintain the Download Archive
+
+From a Git checkout with Python 3 installed, run `npm run release:archive` after changing source files. `npm run release:check` compares every archived file byte-for-byte with current source, including a SHA-256 manifest. CI blocks stale archives. The archive excludes dependencies, built assets, and environment files; users install the pinned lockfile and build locally.
+
+## Verification
+
+Run `npm ci`, `npm test`, `npm run build`, and `npm run release:check`. For the production browser smoke, install Chromium with `npx playwright install chromium`, then run `npm run test:browser`. Browser checks exercise ownership and viewport rendering without connecting a wallet or contacting the ledger.
+
+The install-time font patch is a small version-checked script, `scripts/patch-sdk-fonts.mjs`; upgrading the pinned wallet connector requires reviewing that script. Crossmark remains supported by XRPL Connect's adapter; the unused standalone SDK has been removed.

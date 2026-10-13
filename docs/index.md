@@ -12,3 +12,5 @@ Product and verification documentation for the Cadence app.
   the map from paths to roles.
 - **[README](../README.md)** — run and install instructions for end users.
 - `streampay-technical-brief.docx` (repo root) — product/technical brief.
+
+- [Audit remediation and verification limits](audit-remediation.md)

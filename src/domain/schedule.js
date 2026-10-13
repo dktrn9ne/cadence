@@ -1,3 +1,4 @@
+import { installmentAmount } from "./amounts.js";
 export const TIME_UNITS = {
   seconds15: { label: "15 seconds", seconds: 15 },
   seconds30: { label: "30 seconds", seconds: 30 },
@@ -37,3 +38,6 @@ export const getSchedule = (person) => {
 };
 
 export const getFrequencyMs = (person) => (TIME_UNITS[person.frequency] || TIME_UNITS.minute).seconds * 1000;
+
+export const getInstallmentAmount = (person, sequence = Number(person.paidCount || 0)) =>
+  installmentAmount(person, sequence, getSchedule(person).payments);

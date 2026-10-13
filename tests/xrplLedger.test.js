@@ -24,14 +24,14 @@ const HASH = "9A4C000000000000000000000000000000000000000000000000000000000F01";
 describe("classifyTransactionResult", () => {
   it("classifies tesSUCCESS as validated_success", () => {
     expect(
-      classifyTransactionResult({ meta: { TransactionResult: "tesSUCCESS" } })
+      classifyTransactionResult({ validated: true, meta: { TransactionResult: "tesSUCCESS" } })
     ).toBe(OUTCOMES.SUCCESS);
   });
 
   it("classifies every other ledger result code as validated_failure", () => {
     // tec/tef/tem/tej are all "the ledger answered, and not with success".
     for (const code of ["tecUNFUNDED_PAYMENT", "tecNO_LINE", "tefBAD_AUTH", "temBAD_CURRENCY"]) {
-      expect(classifyTransactionResult({ meta: { TransactionResult: code } })).toBe(
+      expect(classifyTransactionResult({ validated: true, meta: { TransactionResult: code } })).toBe(
         OUTCOMES.FAILURE
       );
     }
@@ -86,7 +86,7 @@ const makeClient = (impl) => ({ request: vi.fn(impl) });
 describe("lookupWithClient", () => {
   it("requests the transaction by hash and reports validated_success", async () => {
     const client = makeClient(async () => ({
-      result: { hash: HASH, meta: { TransactionResult: "tesSUCCESS" } },
+      result: { validated: true, hash: HASH, meta: { TransactionResult: "tesSUCCESS" } },
     }));
     await expect(lookupWithClient(client, HASH)).resolves.toEqual({
       outcome: OUTCOMES.SUCCESS,
@@ -96,7 +96,7 @@ describe("lookupWithClient", () => {
 
   it("reports validated_failure from ledger failure meta", async () => {
     const client = makeClient(async () => ({
-      result: { hash: HASH, meta: { TransactionResult: "tecUNFUNDED_PAYMENT" } },
+      result: { validated: true, hash: HASH, meta: { TransactionResult: "tecUNFUNDED_PAYMENT" } },
     }));
     await expect(lookupWithClient(client, HASH)).resolves.toEqual({
       outcome: OUTCOMES.FAILURE,
@@ -284,7 +284,7 @@ describe("lookupTransaction", () => {
   });
 
   it("opens one client on mainnet, looks the hash up, and disconnects", async () => {
-    state.requestResult = { result: { hash: HASH, meta: { TransactionResult: "tesSUCCESS" } } };
+    state.requestResult = { result: { validated: true, hash: HASH, meta: { TransactionResult: "tesSUCCESS" } } };
     await expect(lookupTransaction(HASH)).resolves.toEqual({ outcome: OUTCOMES.SUCCESS });
     expect(state.instances).toHaveLength(1);
     expect(state.instances[0].url).toBe(XRPL_WS_URL);
@@ -299,13 +299,13 @@ describe("lookupTransaction", () => {
   });
 
   it("keeps a successful classification even if disconnect fails afterwards", async () => {
-    state.requestResult = { result: { hash: HASH, meta: { TransactionResult: "tesSUCCESS" } } };
+    state.requestResult = { result: { validated: true, hash: HASH, meta: { TransactionResult: "tesSUCCESS" } } };
     state.disconnectError = new Error("already closed");
     await expect(lookupTransaction(HASH)).resolves.toEqual({ outcome: OUTCOMES.SUCCESS });
   });
 
   it("returns exactly the normalized shape — nothing more", async () => {
-    state.requestResult = { result: { hash: HASH, meta: { TransactionResult: "tesSUCCESS" } } };
+    state.requestResult = { result: { validated: true, hash: HASH, meta: { TransactionResult: "tesSUCCESS" } } };
     const outcome = await lookupTransaction(HASH);
     expect(Object.keys(outcome)).toEqual(["outcome"]);
   });
@@ -331,5 +331,20 @@ describe("lookupTransaction", () => {
       },
     };
     await expect(lookupTransaction(HASH)).resolves.toEqual({ outcome: OUTCOMES.UNKNOWN });
+  });
+});
+
+
+describe("audit reconciliation regressions", () => {
+  it("withholds a verdict unless validation is explicit", () => {
+    expect(classifyTransactionResult({ meta: { TransactionResult: "tesSUCCESS" } })).toBe(OUTCOMES.UNKNOWN);
+  });
+  it("compares numerically equivalent RLUSD amounts and rejects partial payments", async () => {
+    const expected = { payer: "rPayer", destination: "rRecipient", amount: "1.000000" };
+    const tx = { validated: true, Account: expected.payer, Destination: expected.destination, DeliverMax: { currency: RLUSD_CURRENCY, issuer: RLUSD_ISSUER, value: "1" }, SourceTag: SOURCE_TAG, meta: { TransactionResult: "tesSUCCESS" } };
+    const client = makeClient(async () => ({ result: tx }));
+    expect((await lookupWithClient(client, HASH, expected)).outcome).toBe(OUTCOMES.SUCCESS);
+    tx.Flags = 0x00020000;
+    expect(await lookupWithClient(client, HASH, expected)).toMatchObject({ outcome: OUTCOMES.UNKNOWN, anomaly: "identity_mismatch" });
   });
 });

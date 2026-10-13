@@ -30,6 +30,12 @@ entry point (scheduler tick, "Pay one installment", plan-start payment).
 Scheduled failures never silently retry; the window is unscheduled and retry is
 a fresh, user-initiated action.
 
+## Audit remediation gate (2026-10-13)
+
+See [audit-remediation.md](audit-remediation.md) for the latest repository changes, automated regression coverage, and current verification limits. The older 2026-10-09 browser/mainnet observations below remain historical evidence, not a fresh live-wallet pass.
+
+The current CI gate additionally checks that `latest.zip` matches source, then runs production-browser ownership and narrow-viewport checks. Node.js 22.12+ is required for Electron 41.
+
 ## The matrix
 
 Latest release-gate run: **2026-10-09 · `release/pr04-scheduler-recovery` @ `49c5e6b` · 188/188 tests · build green**.
@@ -99,7 +105,7 @@ requires an actual validated payment (R6/R8/R13 with a real `tesSUCCESS`).
 Run on the release-candidate head before promoting:
 
 ```bash
-npm install          # first run in a fresh checkout
+npm ci               # clean lockfile verification
 npm test             # full vitest suite — must be fully green
 npm run build        # production build — must succeed
 npm run dev          # then, headless browser:

@@ -1,7 +1,7 @@
 // Guard for the self-hosted-fonts contract. The wallet SDK
 // (@textrp/xrpl-connect) ships a CSS @import that pulls Karla from
-// fonts.googleapis.com when the picker mounts; a postinstall patch-package
-// patch strips it and src/main.jsx registers self-hosted @fontsource/karla
+// fonts.googleapis.com when the picker mounts; a version-checked postinstall
+// script strips it and src/main.jsx registers self-hosted @fontsource/karla
 // weights instead. These assertions keep the no-third-party-font guarantee
 // from regressing (a fresh install without the patch, or a dep bump, fails here).
 import { existsSync, readFileSync, readdirSync } from "node:fs";
