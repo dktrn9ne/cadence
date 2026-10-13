@@ -212,6 +212,7 @@ describe("dashboard payment journal wiring", () => {
     await waitFor(() => expect(submitControl.calls).toBe(1));
 
     // The attempt row is durably persisted while the submit is still in flight.
+    await waitFor(() => expect(readDoc()?.journal?.[0]?.type).toBe("attempt_started"));
     const inFlight = readDoc();
     expect(journalTypes(inFlight)).toEqual(["attempt_started:submitted"]);
     expect(inFlight.journal[0]).toMatchObject({

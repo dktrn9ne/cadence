@@ -149,8 +149,14 @@ const makeSeedPlan = (overrides = {}) => ({
   hourlyPay: "0",
   hoursPerWeek: "0",
   frequency: "day",
-  attempts: {},
   ...overrides,
+  attempts: {
+    ...Object.fromEntries(Array.from({ length: overrides.paidCount ?? 2 }, (_, sequence) => [
+      `person-1760000000000:${sequence}#1`,
+      { sequence, status: "validated_success", hash: String(sequence + 1).repeat(64), submittedAt: Date.now() - DAY_MS, amount: "1.000000", payer: PAYER_ADDRESS, destination: DEST_A, attemptNo: 1 },
+    ])),
+    ...(overrides.attempts || {}),
+  },
 });
 
 // Mount with an optional StrictMode wrapper (recovery must survive React
@@ -221,10 +227,10 @@ describe("mount recovery: reload restores plans, never bursts", () => {
   it("approval of a second missed window sends exactly one more installment (no burst)", async () => {
     const now = Date.now();
     seedPlans([makeSeedPlan({ nextRunAt: now - 2 * DAY_MS + 60000 })]); // 2 missed windows
-    submitXrplConnectRlusdPayment.mockResolvedValue({
+    submitXrplConnectRlusdPayment.mockResolvedValueOnce({
       result: { meta: { TransactionResult: "tesSUCCESS" } },
       hash: HASH,
-    });
+    }).mockResolvedValueOnce({ result: { meta: { TransactionResult: "tesSUCCESS" } }, hash: "AB".repeat(32) });
     await mountAndConnect();
     expect(screen.getByText(/2 installments missed while the app was closed/i)).toBeTruthy();
 

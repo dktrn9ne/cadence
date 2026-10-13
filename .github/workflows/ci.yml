@@ -13,7 +13,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - run: npm ci
@@ -21,6 +21,16 @@ jobs:
       - run: npm test -- --run
 
       - run: npm run build
+
+      - run: npm run release:check
+
+      - run: npx playwright install --with-deps chromium
+
+      - run: npm run test:browser
+
+      - run: sudo apt-get install -y xvfb libgtk-3-0t64 libasound2t64
+
+      - run: xvfb-run -a npm run test:desktop
 
       - uses: actions/upload-artifact@v4
         if: always()

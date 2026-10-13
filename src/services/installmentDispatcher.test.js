@@ -208,11 +208,10 @@ describe("guarded installment dispatcher", () => {
       expect(result.reason).toBe("store-failed");
       expect(submit).not.toHaveBeenCalled();
       expect(plans[0].paidCount).toBe(0);
-      // The in-memory record still exists (app state is honest about the
-      // attempt that was blocked), but it never progressed past
-      // awaiting_signature and nothing was submitted untracked.
+      // The wallet call never occurred, so this is a provably unsubmitted
+      // failure. A storage recovery must not strand a hashless unknown.
       const [blockedAttempt] = attemptsList(plans, "plan-1");
-      expect(blockedAttempt.status).toBe("awaiting_signature");
+      expect(blockedAttempt.status).toBe("validated_failure");
     } finally {
       setItemSpy.mockRestore();
     }
@@ -291,4 +290,44 @@ describe("guarded installment dispatcher", () => {
     expect(plan.nextRunAt).toBeNull();
     expect(plan.paidCount).toBe(7);
   });
+  it("stores validated success and its paid-count advance atomically", async () => {
+    const { dispatcher, submit } = setup();
+    submit.mockResolvedValue({ hash: HASH, result: { validated: true, Account: PAYER, Destination: DEST_A, Amount: rlusdAmount("1.000000"), SourceTag: SOURCE_TAG, meta: { TransactionResult: "tesSUCCESS" } } });
+    const snapshots = [];
+    const original = Storage.prototype.setItem;
+    const spy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (key, value) {
+      if (key === "cadence-plans-v1") snapshots.push(JSON.parse(value).plans[0]);
+      return original.call(this, key, value);
+    });
+    try {
+      const result = await dispatcher.dispatchInstallment(makePlan(), 0, "manual", { amount: "1.000000", payer: PAYER });
+      expect(result.outcome).toBe("validated_success");
+      const settled = snapshots.filter((plan) => Object.values(plan.attempts).some((attempt) => attempt.status === "validated_success"));
+      expect(settled.length).toBeGreaterThan(0);
+      expect(settled.every((plan) => plan.paidCount === 1)).toBe(true);
+    } finally { spy.mockRestore(); }
+  });
+
+  it("persists the prepared hash before a submit timeout and never blindly retries", async () => {
+    const { dispatcher, submit, plansRef } = setup();
+    submit.mockImplementation(async (_plan, _amount, { onPrepared }) => {
+      onPrepared(HASH);
+      expect(JSON.parse(localStorage.getItem("cadence-plans-v1")).plans[0].attempts["plan-1:0#1"].hash).toBe(HASH);
+      throw Object.assign(new Error("timeout"), { hash: HASH });
+    });
+    const result = await dispatcher.dispatchInstallment(makePlan(), 0, "manual", { amount: "1.000000", payer: PAYER });
+    expect(result).toMatchObject({ outcome: "unresolved", hash: HASH });
+    expect(latestAttemptFor(plansRef()[0], 0).hash).toBe(HASH);
+    expect((await dispatcher.dispatchInstallment(makePlan(), 0, "manual", { amount: "1.000000", payer: PAYER })).dispatched).toBe(false);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not count a prior receipt as another installment", async () => {
+    const previous = { sequence: 0, attemptNo: 1, status: "validated_success", hash: HASH, amount: "1.000000", payer: PAYER, destination: DEST_A };
+    const { dispatcher, submit, plansRef } = setup({ plan: makePlan({ paidCount: 1, attempts: { "plan-1:0#1": previous } }) });
+    submit.mockResolvedValue({ hash: HASH, result: {} });
+    expect(await dispatcher.dispatchInstallment(makePlan(), 1, "manual", { amount: "1.000000", payer: PAYER })).toMatchObject({ outcome: "unresolved", anomaly: "hash_already_used", hash: null });
+    expect(plansRef()[0].paidCount).toBe(1);
+  });
+
 });

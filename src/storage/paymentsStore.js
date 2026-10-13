@@ -255,7 +255,22 @@ export async function load() {
 // A failing setItem (quota, privacy mode) resolves { ok: false, reason } —
 // the caller halts dispatch and shows the banner; it never throws past the
 // hook.
+let writeQueue = Promise.resolve();
+export const flushPaymentWrites = () => writeQueue;
+
 export async function save(doc) {
+  // Snapshot allowlisted public fields at invocation; unrelated objects (or
+  // functions) never reach a clone or the deferred checksum/write path.
+  const snapshot = {
+    history: (Array.isArray(doc?.history) ? doc.history : []).map(copyHistoryRow).filter(Boolean),
+    journal: (Array.isArray(doc?.journal) ? doc.journal : []).map(copyJournalEntry).filter(Boolean),
+  };
+  const pending = writeQueue.then(() => saveSnapshot(snapshot));
+  writeQueue = pending.catch(() => {});
+  return pending;
+}
+
+async function saveSnapshot(doc) {
   // History arrays are newest-first (addHistoryItem prepends); the cap keeps
   // the newest rows.
   const history = (Array.isArray(doc?.history) ? doc.history : [])

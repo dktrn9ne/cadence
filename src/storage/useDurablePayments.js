@@ -64,6 +64,8 @@ const mergeStatus = (a, b) => {
 };
 
 export function useDurablePayments({
+  enabled = true,
+  beginWrite = () => () => {},
   history,
   journal,
   journalSeq,
@@ -88,8 +90,15 @@ export function useDurablePayments({
   const applyRef = useRef(applyHydratedState);
   applyRef.current = applyHydratedState;
 
+  const beginWriteRef = useRef(beginWrite);
+  beginWriteRef.current = beginWrite;
   const persist = useCallback(async (doc) => {
-    const result = await save(doc);
+    const endWrite = beginWriteRef.current();
+    if (!endWrite) return { ok: false, reason: "payment_session_closed" };
+    let result;
+    try { result = await save(doc); }
+    catch { result = { ok: false, reason: "Payment records could not be saved." }; }
+    finally { endWrite(); }
     if (result.ok) {
       // A write succeeding after a halt clears the halt; otherwise leave the
       // current status (recovery set it) alone.
@@ -109,7 +118,7 @@ export function useDurablePayments({
   // Hydration: one async sequence shared by StrictMode's double mount — the
   // second effect run reuses the in-flight promise instead of re-recovering.
   useEffect(() => {
-    if (hydrationRef.current) return;
+    if (!enabled || hydrationRef.current) return;
     hydrationRef.current = (async () => {
       const result = await load();
 
@@ -173,14 +182,14 @@ export function useDurablePayments({
           : { state: "ready", message: null },
       );
     })();
-  }, []);
+  }, [enabled]);
 
   // Persistence: every record change after hydration, never before. The ref
   // gate is synchronous so even a same-tick change cannot write pre-hydration.
   useEffect(() => {
-    if (!hydratedRef.current) return;
+    if (!enabled || !hydratedRef.current) return;
     persist({ history, journal, journalSeq });
-  }, [history, journal, journalSeq, persist]);
+  }, [enabled, history, journal, journalSeq, persist]);
 
   const acknowledgeStorageIssue = useCallback(() => {
     // Both documents can be in a halting state independently; acknowledging

@@ -1,7 +1,7 @@
 # AGENTS.md — Agent Rules for Cadence
 
 Cadence is a consumer wallet dashboard for RLUSD income verification and scheduled
-XRP Ledger payments — a React 19 + Vite 7 web app with an optional Electron 39
+XRP Ledger payments — a React 19 + Vite 7 web app with an optional Electron 41
 desktop shell, pure frontend, contacting XRPL mainnet only when a user connects a
 wallet or requests ledger data. Orientation, commands, and the codebase map live in
 [.obvious/obvious.md](.obvious/obvious.md); this file is the contract every agent
@@ -52,6 +52,8 @@ scheduling, persistence, retries, or reconciliation:
 - **Deterministic installment IDs:** `${planId}:${sequence}` — derived from plan
   identity and sequence, never generated ad hoc; the per-installment lock is
   keyed on it.
+- **One active payment session per origin** using Web Locks; other tabs never write payment state. Electron also requires its single-instance process lock.
+- **Exact amounts** use integer micro-units and successful receipts; incomplete legacy payment evidence blocks continuation. Payment terms are immutable while active or after the first attempt; editor saves preserve current attempts and progress.
 - **One active attempt per installment** across every entry point (scheduler
   tick, manual "Pay one installment", plan-start payment).
 - **Wallet changes compare payers.** When the connected public account differs
@@ -74,7 +76,7 @@ rule is [docs/QA.md](docs/QA.md).
 
 ## Environment notes
 
-- Node.js 20, npm 10. No `.env` and no secrets are needed for local dev
+- Node.js 22.12+, npm 10+. No `.env` and no secrets are needed for local dev
   (`.env*` are gitignored).
 - If `node_modules` arrives root-owned, Vite's dep optimizer fails with EACCES
   under `node_modules/.vite`: `sudo chown -R $(id -u):$(id -g) node_modules` and

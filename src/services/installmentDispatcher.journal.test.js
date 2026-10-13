@@ -52,6 +52,7 @@ function buildDispatcher({ plan = planFixture(), submit, reconcile, order = [] }
 // the ledger meta classifies without a lookup.
 const bodyReceipt = (hash, transactionResult) => ({
   result: {
+    validated: true,
     hash,
     meta: { TransactionResult: transactionResult },
     Account: PAYER,

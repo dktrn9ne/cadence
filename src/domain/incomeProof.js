@@ -19,9 +19,7 @@ const txJson = (entry) => entry.tx_json || entry.tx || {};
 
 export const deliveredIssuedAmount = (entry) => {
   const delivered = entry.meta?.delivered_amount;
-  if (delivered && typeof delivered === "object") return delivered;
-  const amount = txJson(entry).Amount || txJson(entry).DeliverMax;
-  return amount && typeof amount === "object" ? amount : null;
+  return delivered && typeof delivered === "object" ? delivered : null;
 };
 
 const deliveredXrp = (entry) => {
@@ -44,7 +42,7 @@ const formatProofTime = (iso) =>
 export const isMatchingIncomeTx = (entry, { payer, destination }) => {
   if (!entry) return false; // fail closed on a missing entry
   if (!payer?.startsWith("r") || !destination?.startsWith("r")) return false;
-  if (entry.validated === false) return false;
+  if (entry.validated !== true) return false;
   if (entry.meta?.TransactionResult !== "tesSUCCESS") return false;
   const tx = txJson(entry);
   if (tx.TransactionType !== "Payment") return false;
@@ -52,7 +50,7 @@ export const isMatchingIncomeTx = (entry, { payer, destination }) => {
   if (tx.Destination !== destination) return false;
   if (Number(tx.SourceTag) !== SOURCE_TAG) return false;
   const amount = deliveredIssuedAmount(entry);
-  return Boolean(isRlusdAmount(amount));
+  return Boolean(isRlusdAmount(amount) && Number.isFinite(Number(amount.value)) && Number(amount.value) > 0);
 };
 
 // Newest-first selection preserving account_tx order; every row carries the full
@@ -96,19 +94,27 @@ export const selectExcludedXrpEntries = (transactions, destination) =>
 export const buildIncomeProofStats = ({ incomeRows, excludedXrpEntries, markerRemaining }) => {
   const totalRlusd = incomeRows.reduce((sum, row) => sum + row.amount, 0);
   const totalExcludedXrp = excludedXrpEntries.reduce((sum, entry) => sum + deliveredXrp(entry), 0);
-  const newest = incomeRows[0] ? new Date(incomeRows[0].iso).getTime() : Date.now();
-  const oldest = incomeRows[incomeRows.length - 1] ? new Date(incomeRows[incomeRows.length - 1].iso).getTime() : newest;
-  const observedDays = Math.max(1 / 24, (newest - oldest) / 86400000);
-  const dailyRate = totalRlusd / observedDays;
+  const ordered = [...incomeRows].sort((a, b) => Date.parse(a.iso) - Date.parse(b.iso));
+  const oldest = ordered[0] ? Date.parse(ordered[0].iso) : NaN;
+  const newest = ordered.at(-1) ? Date.parse(ordered.at(-1).iso) : NaN;
+  const observedDays = Number.isFinite(newest - oldest) ? Math.max(0, (newest - oldest) / 86400000) : 0;
+  // The first receipt establishes the baseline; its earning interval is unknown.
+  // Short samples and incomplete ledger history do not support an income rate.
+  const projectionsAvailable = ordered.length >= 3 && observedDays >= 7 && !markerRemaining;
+  const dailyRate = projectionsAvailable
+    ? ordered.slice(1).reduce((sum, row) => sum + row.amount, 0) / observedDays
+    : null;
 
   return {
     incomeCount: incomeRows.length,
     totalRlusd,
     excludedCount: excludedXrpEntries.length,
     totalExcludedXrp,
-    projectedWeekly: dailyRate * 7,
-    projectedMonthly: dailyRate * 30,
-    projectedAnnual: dailyRate * 365,
+    projectionsAvailable,
+    projectionReason: projectionsAvailable ? null : "At least three payments over seven days of complete history are needed for an estimate.",
+    projectedWeekly: projectionsAvailable ? dailyRate * 7 : null,
+    projectedMonthly: projectionsAvailable ? dailyRate * 30 : null,
+    projectedAnnual: projectionsAvailable ? dailyRate * 365 : null,
     lifetimeMatches: markerRemaining ? `${incomeRows.length}+` : incomeRows.length,
     observedDays,
   };

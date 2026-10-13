@@ -54,8 +54,8 @@ function vendorChunk(name) {
   }
   if (REACT_FAMILY.has(name)) return "react-vendor";
   if (matchesFamily(name, CHARTS_FAMILY, CHARTS_FAMILY_PREFIXES)) return "charts";
-  if (matchesFamily(name, XRPL_CODEC, XRPL_CODEC_PREFIXES)) return "xrpl-codec";
-  if (matchesFamily(name, XRPL_CORE, XRPL_CORE_PREFIXES)) return "xrpl";
+  if (matchesFamily(name, XRPL_CODEC, XRPL_CODEC_PREFIXES)) return "xrpl-runtime";
+  if (matchesFamily(name, XRPL_CORE, XRPL_CORE_PREFIXES)) return "xrpl-runtime";
   return "vendor";
 }
 

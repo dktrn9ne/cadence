@@ -49,6 +49,7 @@ import {
   settleValidated,
 } from "../domain/installment.js";
 import { getFrequencyMs, getSchedule } from "../domain/schedule.js";
+import { hashUsedByAnotherInstallment } from "../domain/paymentEvidence.js";
 import { latestAttemptFor, recordAttempt } from "../storage/planState.js";
 import {
   attemptIdentityMatches,
@@ -161,6 +162,11 @@ export function createInstallmentDispatcher({
       // must land durably BEFORE any sign/submit call. A lost write means a
       // submission could not be reconciled after a reload — block instead.
       if (!persistAttempt(person.id, attempt)) {
+        // No wallet call occurred. This is a provably unsubmitted failure,
+        // not an orphaned prompt: do not strand it as hashless unresolved.
+        attempt = settleRejected(attempt);
+        persistAttempt(person.id, attempt);
+        if (source === "scheduled") unschedule(person.id);
         return {
           dispatched: false,
           reason: "store-failed",
@@ -184,7 +190,16 @@ export function createInstallmentDispatcher({
       // --- build + submit (wallet prompt, or local sign + submitAndWait) ----
       let response;
       try {
-        response = await submit(current, amount);
+        response = await submit(current, amount, {
+          onPrepared: (hash) => {
+            if (hashUsedByAnotherInstallment(getPlans(), hash, person.id, sequence)) throw new Error("This signed hash already belongs to another installment.");
+            if (!hash) throw new Error("The signing wallet did not produce a transaction hash.");
+            attempt = markSubmitted(attempt, hash, now());
+            if (!persistAttempt(person.id, attempt)) {
+              throw new Error("The transaction hash could not be persisted before submission.");
+            }
+          },
+        });
       } catch (error) {
         // Classify by PROVABILITY (audit violation 2): a rejected signature or
         // a construction failure proves nothing was submitted — a failed,
@@ -207,19 +222,21 @@ export function createInstallmentDispatcher({
           if (source === "scheduled") unschedule(person.id);
           return { dispatched: true, outcome: "validated_failure", error, hash: null, failureReason: error?.message || "The payment could not be built or submitted." };
         }
-        attempt = markUnresolved(attempt, null, now());
+        const recoveryHash = error?.hash || attempt.hash || null;
+        attempt = markUnresolved(attempt, recoveryHash, now());
         persistAttempt(person.id, attempt);
         emitJournal({
           type: "attempt_outcome",
           installmentId: key,
           status: "unresolved",
+          txHash: recoveryHash || undefined,
           error: error?.message || "The submission outcome is unknown — reconciling before any retry.",
           reason: errorClass,
         });
         return {
           dispatched: true,
           outcome: "unresolved",
-          hash: null,
+          hash: recoveryHash,
           anomaly: null,
           failureReason: error?.message || "The submission outcome is unknown — reconciling before any retry.",
         };
@@ -227,7 +244,16 @@ export function createInstallmentDispatcher({
 
       const result = response?.result ?? {};
       const inner = result?.result || result || {};
-      const txHash = response?.hash || inner?.hash || null;
+      const txHash = response?.hash || inner?.hash || attempt.hash || null;
+
+      if (hashUsedByAnotherInstallment(getPlans(), txHash, person.id, sequence)) {
+        // A wallet may return an old receipt for an identical payment. Never
+        // attach that hash to a second installment or let recovery count it.
+        attempt = markUnresolved(attempt, null, now());
+        persistAttempt(person.id, attempt);
+        emitJournal({ type: "attempt_outcome", installmentId: key, status: "unresolved", reason: "hash_already_used" });
+        return { dispatched: true, outcome: "unresolved", hash: null, anomaly: "hash_already_used", failureReason: "The wallet returned a hash already used by another installment. Find the new payment's hash in wallet history." };
+      }
 
       if (!txHash) {
         // The wallet resolved without a usable hash: the response's existence
@@ -280,7 +306,8 @@ export function createInstallmentDispatcher({
         anomaly = "identity_mismatch";
         settled = markUnresolved(attempt, txHash, now());
       } else {
-        const verdict = identityOk === true ? classifyTransactionResult({ meta }) : null;
+        const verdict = identityOk === true && inner?.validated === true
+          ? classifyTransactionResult({ meta, validated: true }) : null;
         if (verdict === OUTCOMES.SUCCESS) {
           settled = settleValidated(attempt, meta);
         } else if (verdict === OUTCOMES.FAILURE) {
@@ -299,7 +326,8 @@ export function createInstallmentDispatcher({
           }
         }
       }
-      if (!persistAttempt(person.id, settled)) storeDegraded = true;
+      // Success status and paid count must land in the SAME storage write.
+      if (settled.status !== "validated_success" && !persistAttempt(person.id, settled)) storeDegraded = true;
 
       // PR 02: journal the terminal label from the settled attempt. The
       // attempt statuses are validated_success / validated_failure /
@@ -346,8 +374,7 @@ export function createInstallmentDispatcher({
       // transaction, exactly once per attempt.
       const nextPaidCount = paidCount + 1;
       const complete = nextPaidCount >= getSchedule(current).payments;
-      setPlans(
-        getPlans().map((plan) =>
+      const advancedPlans = getPlans().map((plan) =>
           plan?.id === person.id
             ? {
                 ...plan,
@@ -356,8 +383,10 @@ export function createInstallmentDispatcher({
                 nextRunAt: complete ? null : now() + getFrequencyMs(plan),
               }
             : plan,
-        ),
-      );
+        );
+      const recorded = recordAttempt(advancedPlans, person.id, settled);
+      if (!recorded.persisted) storeDegraded = true;
+      setPlans(recorded.plans);
       return { dispatched: true, outcome: "validated_success", hash: txHash, nextPaidCount, complete, storeDegraded };
     } finally {
       claims.delete(key);
