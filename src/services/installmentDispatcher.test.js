@@ -208,11 +208,10 @@ describe("guarded installment dispatcher", () => {
       expect(result.reason).toBe("store-failed");
       expect(submit).not.toHaveBeenCalled();
       expect(plans[0].paidCount).toBe(0);
-      // The in-memory record still exists (app state is honest about the
-      // attempt that was blocked), but it never progressed past
-      // awaiting_signature and nothing was submitted untracked.
+      // The wallet call never occurred, so this is a provably unsubmitted
+      // failure. A storage recovery must not strand a hashless unknown.
       const [blockedAttempt] = attemptsList(plans, "plan-1");
-      expect(blockedAttempt.status).toBe("awaiting_signature");
+      expect(blockedAttempt.status).toBe("validated_failure");
     } finally {
       setItemSpy.mockRestore();
     }

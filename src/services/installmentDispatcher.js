@@ -162,6 +162,11 @@ export function createInstallmentDispatcher({
       // must land durably BEFORE any sign/submit call. A lost write means a
       // submission could not be reconciled after a reload — block instead.
       if (!persistAttempt(person.id, attempt)) {
+        // No wallet call occurred. This is a provably unsubmitted failure,
+        // not an orphaned prompt: do not strand it as hashless unresolved.
+        attempt = settleRejected(attempt);
+        persistAttempt(person.id, attempt);
+        if (source === "scheduled") unschedule(person.id);
         return {
           dispatched: false,
           reason: "store-failed",

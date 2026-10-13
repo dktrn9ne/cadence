@@ -53,7 +53,7 @@ scheduling, persistence, retries, or reconciliation:
   identity and sequence, never generated ad hoc; the per-installment lock is
   keyed on it.
 - **One active payment session per origin** using Web Locks; other tabs never write payment state. Electron also requires its single-instance process lock.
-- **Exact amounts** use integer micro-units and successful receipts; incomplete legacy payment evidence blocks continuation. Payment terms are immutable after the first attempt.
+- **Exact amounts** use integer micro-units and successful receipts; incomplete legacy payment evidence blocks continuation. Payment terms are immutable while active or after the first attempt; editor saves preserve current attempts and progress.
 - **One active attempt per installment** across every entry point (scheduler
   tick, manual "Pay one installment", plan-start payment).
 - **Wallet changes compare payers.** When the connected public account differs

@@ -61,7 +61,7 @@ Cadence can submit real XRPL mainnet transactions.
 - Each plan pays one weekly total and then stops. Missed windows require individual approval.
 - Amounts use integer micro-units. Prior successful receipts determine the remaining balance, and the final installment reconciles exactly to the weekly total.
 - Older plans with incomplete prior receipt evidence are blocked until the operator reviews wallet history and creates a new plan for the remaining amount.
-- Recipient, payer, amount, and frequency cannot change after a payment attempt starts. Pause the old plan and create a new plan for changed terms.
+- Recipient, payer, amount, and frequency cannot change while a plan is active or after a payment attempt starts. Pause the old plan and create a new plan for changed terms.
 
 The web version asks the connected XRPL wallet to confirm each recipient payment. The local desktop version signs and submits each recipient payment with the imported mnemonic/family seed wallet.
 
@@ -84,7 +84,7 @@ Cadence uses XRPL Connect for the web wallet selector. The current web flow incl
 - Each plan pays one weekly total and then stops. Missed windows require individual approval.
 - Amounts use integer micro-units. Prior successful receipts determine the remaining balance, and the final installment reconciles exactly to the weekly total.
 - Older plans with incomplete prior receipt evidence are blocked until the operator reviews wallet history and creates a new plan for the remaining amount.
-- Recipient, payer, amount, and frequency cannot change after a payment attempt starts. Pause the old plan and create a new plan for changed terms.
+- Recipient, payer, amount, and frequency cannot change while a plan is active or after a payment attempt starts. Pause the old plan and create a new plan for changed terms.
 
 ## Safety Notes
 

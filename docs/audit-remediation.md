@@ -7,10 +7,11 @@ Scope: repairs to main `7a542a6`, tracked in issue #34. All payment verification
 | Finding | Repair | Regression coverage |
 | --- | --- | --- |
 | Independent tabs can dispatch stale installments | Web Locks grant one writer per origin/profile. Other tabs cannot persist or dispatch. Ownership is retained until active dispatch/recovery/record writes finish. Electron also takes a single-instance process lock. | `paymentSession.test.js`; production-browser ownership smoke |
-| A local submit timeout loses its hash | The public signed hash is persisted before relay; a persistence failure blocks relay. Disconnect cleanup cannot erase a receipt. | `payment-submission.test.js`; dispatcher pre-relay test |
+| A local submit timeout loses its hash | The public signed hash is persisted before relay; a persistence failure blocks relay. Disconnect cleanup cannot erase a receipt. A record-write failure before the wallet call is a provably unsubmitted failure, not a hashless unknown. | `payment-submission.test.js`; dispatcher pre-relay test |
 | Hashless unknowns have no recovery input | Recovery form accepts a public wallet-history hash and verifies its payment identity and explicit ledger validation. Unknown answers remain blocked. | `recoverPaymentHash.test.js` |
 | An old receipt can count another installment | A hash already attached to another installment cannot settle a new one; recovery refuses any already-attached hash. | Dispatcher receipt-reuse test |
 | Success status/count can separate across writes | Successful attempt status, paid count, and next schedule are persisted in one plan envelope. Recovery uses the same atomic envelope principle. | Dispatcher atomic-settlement test |
+| A stale editor can overwrite a later payment | Metadata edits merge with current attempts/progress; active or attempted payment terms stay locked. | `planEdits.test.js` |
 | Floating-point division loses the weekly total | Integer micro-unit accounting allocates the remaining balance using successful receipts and reconciles the final installment. Missing legacy receipt evidence blocks continuation; payment terms freeze after attempts start. | `amounts.test.js`, including 40,320-installment regression |
 | One receipt produces inflated annual income | Estimates require at least three receipts, seven days, and complete fetched history. The first receipt is a timing baseline, excluded from the rate numerator. | Income-proof sample/history tests |
 | Partial income can use the requested amount | Only a positive, finite ledger-delivered RLUSD amount counts, with explicit validation. Reconciliation compares numerically equal amounts and refuses partial-payment flags. | Income-proof and ledger tests |
@@ -23,11 +24,11 @@ Scope: repairs to main `7a542a6`, tracked in issue #34. All payment verification
 ## Verification
 
 - Clean `npm ci`: passed.
-- `npm test`: **350 tests passed in 29 files**.
+- `npm test`: **353 tests passed in 30 files**.
 - `npm run build`: passed; circular XRPL chunk warning removed.
 - `npm audit`: **zero reported vulnerabilities** in the resolved dependency graph. This does not establish that code bundled inside the wallet SDK has no vulnerabilities.
 - `npm run release:check`: archive byte comparison is part of the release gate.
-- Production-browser checks passed in CI for same-origin tab ownership and a 390px viewport. A built-Electron opening/session smoke is also part of the updated CI gate. Local execution was blocked: the browser download was empty/truncated in this environment. Electron launch was also blocked by the environment's socket/process restrictions. These checks are not represented as local passes.
+- Production-browser checks passed in CI for same-origin tab ownership and a 390px viewport. The built-Electron opening/session smoke also passed in CI. Local execution was blocked: the browser download was empty/truncated in this environment. Electron launch was also blocked by the environment's socket/process restrictions. These checks are not represented as local passes.
 - Local runtime: Node 24. CI verifies the supported Node 22 baseline.
 - A full real-wallet web/desktop flow remains a human release check. No funds, wallet secrets, or actual signing are used by the automated gate.
 

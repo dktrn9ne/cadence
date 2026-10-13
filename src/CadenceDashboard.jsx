@@ -17,6 +17,7 @@ import {
 } from "./domain/journal.js";
 import { usePaymentSession } from "./storage/usePaymentSession.js";
 import { recoverPaymentHash } from "./services/recoverPaymentHash.js";
+import { mergePlanEdit } from "./domain/planEdits.js";
 import { weeklyUnits } from "./domain/amounts.js";
 import { hashUsedByAnotherInstallment } from "./domain/paymentEvidence.js";
 import { recordAttempt, attemptKey } from "./storage/planState.js";
@@ -1416,12 +1417,7 @@ export default function CadenceDashboard() {
   const savePerson = (draft) => {
     if (!paymentSession.isOwner()) throw new Error("Another Cadence tab is managing payments. Close it and refresh this tab.");
     const existing = peopleRef.current.find((item) => item.id === draft.id);
-    if (existing && (Number(existing.paidCount || 0) > 0 || Object.keys(existing.attempts || {}).length > 0)) {
-      const fields = ["address", "payMode", "weeklyPay", "hourlyPay", "hoursPerWeek", "frequency"];
-      if (fields.some((key) => String(draft[key] ?? "") !== String(existing[key] ?? "")) || existing.payer !== walletAddress) {
-        throw new Error("Payment terms are locked after an attempt starts. Pause this plan and create a new plan for changed terms.");
-      }
-    }
+    draft = mergePlanEdit(draft, existing, walletAddress);
     weeklyUnits(draft);
     if (weeklyUnits(draft) < BigInt(getSchedule(draft).payments)) throw new Error("Increase the weekly amount or choose a longer interval; every installment must be at least 0.000001 RLUSD.");
     const next = { ...stampPlanPayer(draft, walletAddress), payMode: draft.payMode || "weekly", weeklyPay: draft.weeklyPay ?? draft.amount ?? "16", hourlyPay: draft.hourlyPay ?? "20", hoursPerWeek: draft.hoursPerWeek ?? "40", id: draft.id || `person-${Date.now()}`, paidCount: draft.paidCount || 0, nextRunAt: draft.nextRunAt || null };
@@ -1603,6 +1599,9 @@ export default function CadenceDashboard() {
       // dispatch wiring itself. Log it — never swallow.
       logEvent("payment.dispatch.failed", { personId: person.id, name: person.name, source, error: safeLogPayload(error) });
       setPaymentMessage(error?.message || "Payment could not be dispatched.");
+      if (source === "scheduled") {
+        updatePeople((current) => current.map((item) => item.id === person.id ? { ...item, active: false, nextRunAt: null } : item));
+      }
       return { dispatched: false, reason: "dispatch-error" };
     } finally {
       endOperation();
