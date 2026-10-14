@@ -144,23 +144,59 @@ window: context-isolated (`contextIsolation: true`, `nodeIntegration: false`),
 loading the built `dist/index.html?desktop=1` (`npm run desktop`) or the Vite dev
 server (`npm run desktop:dev`, wired through `CADENCE_DEV_SERVER_URL` by
 `electron/dev-runner.cjs`). It appends renderer console output and load failures
-to `cadence-renderer.log` in the Electron userData directory (Linux default:
-`~/.config/cadence/`; the "Cadence window created" line prints the exact path).
+to `cadence-renderer.log` in the Electron userData directory — for the unpackaged
+launches documented here (`electron electron/main.cjs`, used by both
+`npm run desktop` and the smoke below), that is
+`~/.config/Electron/cadence-renderer.log` on Linux; the "Cadence window created"
+line always prints the exact path.
 
 **System libraries** — Electron needs these on a fresh Linux host (CI runner or
 sandbox) before `npm run desktop` or the headless smoke:
 
 ```bash
+sudo apt-get update
 sudo apt-get install -y xvfb libcups2 libnss3 libgbm1 libasound2t64 libgtk-3-0t64 \
   libxtst6 libxss1 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libdrm2
 ```
+
+Verified 2026-10-14 on a fresh Debian 13 (trixie) sandbox (clone of main @
+`71db5d4`, clean `npm ci`): the line above succeeded and the smoke below passed
+end-to-end. That image shipped 10 of the 12 packages already — only `xvfb`
+(plus its X-stack dependencies) and `libcups2` were newly installed — so it
+could **not** reproduce a fully-bare host where every library is missing; treat
+the line as a verified superset and let the `ldd` diagnostic below decide what
+your host actually needs. (`libatk-1.0` / `libatk-bridge` / `libatspi`, which
+the Electron binary links directly, need no explicit entries on Debian 13:
+`libgtk-3-0t64` hard-depends on all three — verified via `apt-cache depends`.)
+
+For diagnosing a host that is missing libraries, the Electron 41 binary's
+direct shared-library dependencies (`objdump -p node_modules/electron/dist/electron
+| grep NEEDED`) map to Debian 13 packages:
+
+| Library | Debian 13 package |
+|---------|-------------------|
+| `libnss3.so`, `libsmime3.so`, `libnssutil3.so` | `libnss3` |
+| `libnspr4.so` | `libnspr4` |
+| `libcups.so.2` | `libcups2` |
+| `libgbm.so.1` | `libgbm1` |
+| `libasound.so.2` | `libasound2t64` |
+| `libgtk-3.so.0` | `libgtk-3-0t64` |
+| `libatk-1.0.so.0`, `libatk-bridge-2.0.so.0`, `libatspi.so.0` | `libatk1.0-0t64`, `libatk-bridge2.0-0t64`, `libatspi2.0-0t64` (via `libgtk-3-0t64`) |
+| `libxkbcommon.so.0` | `libxkbcommon0` |
+| `libXcomposite.so.1`, `libXdamage.so.1`, `libXrandr.so.2` | `libxcomposite1`, `libxdamage1`, `libxrandr2` |
+| `libXtst.so.6`, `libXss.so.1`, `libdrm.so.2` | `libxtst6`, `libxss1`, `libdrm2` |
+| `libudev.so.1` | `libudev1` |
+
+The remaining direct dependencies (`libX11`, `libXext`, `libXfixes`, `libxcb`,
+the glib/gio/gobject trio, `libcairo`, `libpango`, `libdbus`, `libexpat`, and
+the libc/libm/libpthread/libdl/libgcc runtime) are present on any base image.
 
 **Headless desktop smoke** — build, launch under a virtual display, and assert on
 the renderer log (window created, no load failure):
 
 ```bash
 npm run build
-LOG="$HOME/.config/cadence/cadence-renderer.log"  # userData default on Linux; the window-created line prints the real path
+LOG="$HOME/.config/Electron/cadence-renderer.log"  # unpackaged script-path launches use Electron's default userData; the window-created line prints the real path
 rm -f "$LOG"
 xvfb-run -a npx electron electron/main.cjs --no-sandbox &  # --no-sandbox: no setuid chrome-sandbox helper in sandboxes/CI
 APP_PID=$!
@@ -181,6 +217,34 @@ Expected outcomes and boundaries:
 | Renderer output | Renderer console lines land in the same log with level/source/message |
 | Screenshots | Best-effort only: headless hosts without a compositor may not capture windows — the log assertions are the evidence; record the limitation rather than faking a pass |
 | Full wallet flow | Out of scope headless: connecting and signing need an external XRP wallet (the desktop app imports a mnemonic/family seed at runtime — never in tests, fixtures, or recordings) |
+
+**Sandbox/CI troubleshooting** — the failure modes seen in practice:
+
+- **Missing shared libraries** (the historical first desktop-QA bring-up
+  failure). The process dies before any window appears: the dynamic loader
+  prints `error while loading shared libraries: <lib>.so: cannot open shared
+  object file`, and Electron exits without writing its renderer log. Diagnose
+  with `ldd node_modules/electron/dist/electron | grep "not found"`, then
+  install the mapped package(s) from the table above. Not reproducible on the
+  Debian 13 sandboxes used to verify this section (their base image ships the
+  libraries), so the `ldd` check is the reliable test on any host. On
+  pre-trixie Debian/Ubuntu releases the same libraries ship without the `t64`
+  suffix (not verified this release — confirm names with your package manager).
+- **Launched without a virtual display** (reproduced 2026-10-14). Running
+  `electron` directly instead of under `xvfb-run` fails with
+  `Missing X server or $DISPLAY` (`ozone_platform_x11.cc`), then
+  `The platform failed to initialize. Exiting.` and `exited with signal
+  SIGSEGV`. Always launch through `xvfb-run -a`.
+- **D-Bus errors under xvfb** (reproduced 2026-10-14).
+  `Failed to connect to the bus: Could not parse server address` lines on
+  stderr are container noise — the window still creates and the smoke passes.
+  Judge the smoke by the renderer-log assertions, not stderr.
+- **Smoke reports `FAIL: no window` with no log file** — check the log path
+  first: unpackaged script-path launches use Electron's default userData
+  (`~/.config/Electron/`), and the `Cadence window created` line prints the
+  exact path to grep. Save the smoke as a script file rather than pasting it
+  into an interactive shell — its `pkill -f electron/main.cjs` can otherwise
+  match the pasting shell's own command line and kill it.
 
 ## Evidence index (latest gate)
 

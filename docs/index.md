@@ -3,8 +3,10 @@
 Product and verification documentation for the Cadence app.
 
 - **[QA matrix](./QA.md)** — the scheduler-recovery & reconciliation matrix
-  (R1–R16), the release gate, and desktop (Electron) verification: expected
-  outcomes and how to run each check.
+  (R1–R16), the release gate, and desktop (Electron) verification: the
+  sandbox/CI setup (xvfb + Electron shared-library install, verified on
+  Debian 13), the headless smoke, troubleshooting, expected outcomes, and how
+  to run each check.
 - **[Agent rules](../AGENTS.md)** — the contract for agents changing this repo:
   lockfile installs, test hygiene (fixtures and mocks, never secrets), frozen
   XRPL constants, the payment-safety contract, and merge discipline.
