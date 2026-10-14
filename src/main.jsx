@@ -1,6 +1,10 @@
 // Karla is self-hosted for the @textrp/xrpl-connect wallet modal (weights
 // 300/400/600). The modal's CSS used to @import them from fonts.googleapis.com
-// at picker mount; a postinstall patch strips that import — see patches/.
+// at picker mount; the version-checked postinstall script
+// (scripts/patch-sdk-fonts.mjs) strips that import. Registration alone does
+// not theme the modal — its shadow CSS defaults --xc-font-family to a system
+// stack — so CadenceDashboard.jsx injects theme.fontConnector on the
+// connector element, which the SDK forwards into its modal portals.
 import "@fontsource/karla/300.css";
 import "@fontsource/karla/400.css";
 import "@fontsource/karla/600.css";

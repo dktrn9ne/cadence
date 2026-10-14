@@ -40,4 +40,9 @@ export const theme = {
   fontHeading: '"Space Grotesk", "Manrope", system-ui, sans-serif',
   fontBody: '"Manrope", system-ui, sans-serif',
   fontData: '"IBM Plex Mono", ui-monospace, monospace',
+  // Wallet-picker modal — self-hosted Karla (weights 300/400/600 via
+  // @fontsource/karla, imported in src/main.jsx). Injected on the connector
+  // element as --xc-font-family; falls back to bundled Manrope, never a
+  // network font.
+  fontConnector: '"Karla", "Manrope", system-ui, sans-serif',
 };

@@ -2087,7 +2087,17 @@ export default function CadenceDashboard() {
         .intro-note { margin-top: 20px; }
         .intro-connect-form { display: grid; gap: 14px; max-width: 390px; margin: 0 auto; text-align: left; }
         .intro-connect-form .button { width: 100%; }
-        .xrpl-connector { display: none; }
+        .xrpl-connector {
+          display: none;
+          /* The picker renders inside the SDK's shadow DOM, whose :host rules
+             default --xc-font-family to a system font stack — Karla's
+             @font-face registration alone never reaches it. A light-DOM
+             declaration on the host element wins that cascade, and the SDK
+             forwards host-computed --xc-* values into its modal portals
+             (forwardCSSVariables), so this one property themes the connector
+             element and both portals with the self-hosted Karla stack. */
+          --xc-font-family: ${theme.fontConnector};
+        }
         .wallet-option-disabled { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: 10px; border: 1px dashed ${theme.hairline}; background: ${theme.fillSoft}; }
         .wallet-option-name { font-size: 12px; font-weight: 600; color: ${theme.textPrimary}; }
         .wallet-option-hint { font-size: 11px; line-height: 1.45; color: ${theme.textMuted}; }
