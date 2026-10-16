@@ -40,5 +40,6 @@ describe("brand tokens", () => {
     expect(theme.fontHeading).toBe('"Space Grotesk", "Manrope", system-ui, sans-serif');
     expect(theme.fontBody).toBe('"Manrope", system-ui, sans-serif');
     expect(theme.fontData).toBe('"IBM Plex Mono", ui-monospace, monospace');
+    expect(theme.fontConnector).toBe('"Karla", "Manrope", system-ui, sans-serif');
   });
 });

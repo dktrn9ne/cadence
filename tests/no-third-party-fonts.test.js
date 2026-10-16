@@ -7,6 +7,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { theme } from "../src/brand/tokens.js";
 
 // `npm test` runs from the repo root (matching CI), so node_modules is a
 // well-known path. The lib's exports map hides package.json, so scan the
@@ -49,5 +50,24 @@ describe("self-hosted fonts (wallet-picker path)", () => {
         `${url[1]} should exist locally`
       ).toBe(true);
     }
+  });
+
+  it("injects the self-hosted Karla stack into the connector's shadow DOM", () => {
+    // Registration alone is not enough: the connector element's shadow CSS
+    // defaults --xc-font-family to a system font stack, so the @font-face
+    // declarations never take effect on the picker path. The app must set the
+    // custom property on the connector element from light DOM — that value
+    // beats the shadow :host default and is what the SDK forwards into its
+    // modal portals. This pins the wiring (selector, property, token) so the
+    // typography intent cannot silently detach from the font registration.
+    const dashboard = readFileSync(join(process.cwd(), "src", "CadenceDashboard.jsx"), "utf8");
+    const rule = dashboard.match(/\.xrpl-connector\s*\{[^}]*\}/);
+    expect(rule, "the .xrpl-connector rule should exist").not.toBeNull();
+    expect(rule[0]).toContain("--xc-font-family: ${theme.fontConnector}");
+
+    // The stack itself stays local and Karla-first.
+    expect(theme.fontConnector.startsWith('"Karla"')).toBe(true);
+    expect(theme.fontConnector, "the connector stack must stay offline").not.toContain("https://");
+    expect(theme.fontConnector).not.toContain("url(");
   });
 });
